@@ -46,50 +46,74 @@ class RBDataset(Dataset):
         if not os.path.exists(self.data_path):
             raise FileNotFoundError(f"Data path not found: {self.data_path}")
 
+        self.run_lengths = []  # Track per-run temporal lengths
+
         # Load high-resolution data
         with h5py.File(self.data_path, 'r') as f:
-            # Get frame keys and sort them
+            # Get frame-style keys and sort them if present
             frame_keys = [k for k in f.keys() if k.startswith('frame_')]
             frame_keys.sort()
 
-            if not frame_keys:
-                raise ValueError(f"No frame data found in {self.data_path}")
-
-            # Load first frame to get dimensions
-            first_frame = f[frame_keys[0]]
-            field_keys = ['temperature', 'pressure', 'velocity_x', 'velocity_y']  # Order: [T, p, u, v]
-
-            # Get spatial dimensions
-            temp_data = first_frame['temperature']
-            H, W = temp_data.shape
-            T = len(frame_keys)
-
-            # Pre-allocate tensor: [T, H, W, 4]
-            self.high_res_data = torch.zeros((T, H, W, 4), dtype=torch.float32)
-
-            # Load all frames
-            for t_idx, frame_key in enumerate(frame_keys):
-                frame = f[frame_key]
-                for var_idx, field in enumerate(field_keys):
-                    self.high_res_data[t_idx, :, :, var_idx] = torch.tensor(
-                        frame[field][:], dtype=torch.float32
-                    )
-
-            # Get metadata
-            if 'Ra' in f.attrs:
-                self.Ra = f.attrs['Ra']
+            if frame_keys:
+                self._load_frame_datasets(f, frame_keys)
+            elif all(k in f.keys() for k in ('p', 'b', 'u', 'w')):
+                self._load_consolidated_dataset(f)
             else:
-                self.Ra = 1e5  # Default
+                available = list(f.keys())
+                raise ValueError(
+                    f"Unsupported dataset structure in {self.data_path}. Available top-level keys: {available}"
+                )
 
-            if 'Pr' in f.attrs:
-                self.Pr = f.attrs['Pr']
-            else:
-                self.Pr = 0.7  # Default
+    def _load_frame_datasets(self, file_handle, frame_keys: List[str]):
+        """Load legacy frame_* style datasets."""
+        field_keys = ['temperature', 'pressure', 'velocity_x', 'velocity_y']  # Order: [T, p, u, v]
 
-            if 'dt' in f.attrs:
-                self.dt = f.attrs['dt']
-            else:
-                self.dt = 0.1  # Default
+        # Get spatial dimensions from first frame
+        first_frame = file_handle[frame_keys[0]]
+        temp_data = first_frame['temperature']
+        H, W = temp_data.shape
+        T = len(frame_keys)
+
+        # Pre-allocate tensor: [T, H, W, 4]
+        self.high_res_data = torch.zeros((T, H, W, 4), dtype=torch.float32)
+
+        # Load all frames
+        for t_idx, frame_key in enumerate(frame_keys):
+            frame = file_handle[frame_key]
+            for var_idx, field in enumerate(field_keys):
+                self.high_res_data[t_idx, :, :, var_idx] = torch.tensor(
+                    frame[field][:], dtype=torch.float32
+                )
+
+        # Metadata
+        self.Ra = file_handle.attrs.get('Ra', 1e5)
+        self.Pr = file_handle.attrs.get('Pr', 0.7)
+        self.dt = file_handle.attrs.get('dt', 0.1)
+
+        self.run_lengths = [T]
+
+    def _load_consolidated_dataset(self, file_handle):
+        """Load consolidated datasets with [p,b,u,w] structure."""
+        # Load channels: shapes [n_runs, n_samples, H, W]
+        pressure = torch.from_numpy(file_handle['p'][:]).float()
+        temperature = torch.from_numpy(file_handle['b'][:]).float()
+        velocity_x = torch.from_numpy(file_handle['u'][:]).float()
+        velocity_y = torch.from_numpy(file_handle['w'][:]).float()
+
+        n_runs, n_samples, H, W = pressure.shape
+        self.run_lengths = [n_samples] * n_runs
+
+        # Stack to [n_runs, n_samples, H, W, 4] with order [T, p, u, v]
+        stacked = torch.stack(
+            [temperature, pressure, velocity_x, velocity_y], dim=-1
+        )
+        self.high_res_data = stacked.view(-1, H, W, 4).clone()
+
+        # Metadata
+        self.Ra = file_handle.attrs.get('Ra', 1e5)
+        self.Pr = file_handle.attrs.get('Pr', 0.7)
+        self.dt = file_handle.attrs.get('dt', 0.1)
+
         
         # Data shape: [T, H, W, 4]
         self.T_steps, self.H_high, self.W_high, self.n_vars = self.high_res_data.shape
@@ -104,60 +128,97 @@ class RBDataset(Dataset):
         """Create low-resolution data by spatial and temporal downsampling."""
         # Rearrange to [T, 4, H, W] for downsampling
         data_tchw = self.high_res_data.permute(0, 3, 1, 2)  # [T, 4, H, W]
-        
-        # Spatial downsampling using average pooling
-        if self.spatial_downsample > 1:
-            data_downsampled = F.avg_pool2d(
-                data_tchw.view(-1, self.n_vars, self.H_high, self.W_high),
-                kernel_size=self.spatial_downsample,
-                stride=self.spatial_downsample
-            )
-            data_downsampled = data_downsampled.view(
-                self.T_steps, self.n_vars, 
-                self.H_high // self.spatial_downsample,
-                self.W_high // self.spatial_downsample
-            )
+
+        # Split data per run to avoid mixing sequences at boundaries
+        if not self.run_lengths:
+            self.run_lengths = [self.T_steps]
+
+        run_slices = []
+        cursor = 0
+        for length in self.run_lengths:
+            run_slices.append(data_tchw[cursor:cursor + length])
+            cursor += length
+
+        low_res_runs = []
+        low_run_lengths = []
+
+        for run_data in run_slices:
+            if run_data.numel() == 0:
+                continue
+
+            # Spatial downsampling using average pooling
+            if self.spatial_downsample > 1:
+                run_downsampled = F.avg_pool2d(
+                    run_data,
+                    kernel_size=self.spatial_downsample,
+                    stride=self.spatial_downsample
+                )
+            else:
+                run_downsampled = run_data
+
+            # Temporal downsampling
+            if self.temporal_downsample > 1:
+                indices = torch.arange(0, run_downsampled.shape[0], self.temporal_downsample)
+                run_downsampled = run_downsampled[indices]
+
+            low_res_runs.append(run_downsampled)
+            low_run_lengths.append(run_downsampled.shape[0])
+
+        if low_res_runs:
+            self.low_res_data = torch.cat(low_res_runs, dim=0)
         else:
-            data_downsampled = data_tchw
-            
-        # Temporal downsampling
-        if self.temporal_downsample > 1:
-            indices = torch.arange(0, self.T_steps, self.temporal_downsample)
-            self.low_res_data = data_downsampled[indices]  # [T', 4, H', W']
+            # Fallback empty tensor if no data was loaded
+            self.low_res_data = torch.empty((0, self.n_vars, 0, 0))
+
+        self.low_res_run_lengths = low_run_lengths if low_run_lengths else [self.low_res_data.shape[0]]
+
+        self.T_low = self.low_res_data.shape[0]
+        if self.T_low > 0:
+            _, _, self.H_low, self.W_low = self.low_res_data.shape
         else:
-            self.low_res_data = data_downsampled
-            
-        self.T_low, _, self.H_low, self.W_low = self.low_res_data.shape
-        
+            self.H_low = self.W_low = 0
+
     def _create_clips(self):
         """Split data into overlapping temporal clips."""
         self.clips_low = []
         self.clips_high = []
 
-        # Determine available clips
-        max_clips_low = max(0, self.T_low - self.clip_length + 1)
-        max_clips_high = max(0, self.T_steps - self.clip_length * self.temporal_downsample + 1)
-
-        max_clips = min(max_clips_low, max_clips_high // self.temporal_downsample)
+        if not hasattr(self, 'low_res_run_lengths'):
+            self.low_res_run_lengths = [self.T_low]
 
         # Use smaller step size to create more overlapping clips for training data
         step_size = 1 if self.split == 'train' else max(1, self.clip_length // 2)
 
-        # Create clips with overlapping
-        for i in range(0, max_clips, step_size):
-            if i + self.clip_length > self.T_low:
-                break
+        low_cursor = 0
+        high_cursor = 0
 
-            # Low-resolution clip
-            low_clip = self.low_res_data[i:i + self.clip_length]  # [8, 4, H_low, W_low]
-            self.clips_low.append(low_clip)
+        for run_idx, low_length in enumerate(self.low_res_run_lengths):
+            high_length = self.run_lengths[run_idx] if run_idx < len(self.run_lengths) else self.run_lengths[-1]
 
-            # Corresponding high-resolution clip
-            start_high = i * self.temporal_downsample
-            end_high = start_high + self.clip_length * self.temporal_downsample
-            high_indices = torch.arange(start_high, end_high, self.temporal_downsample)
-            high_clip = self.high_res_data[high_indices].permute(0, 3, 1, 2)  # [8, 4, H_high, W_high]
-            self.clips_high.append(high_clip)
+            if low_length < self.clip_length or high_length < self.clip_length * self.temporal_downsample:
+                low_cursor += low_length
+                high_cursor += high_length
+                continue
+
+            max_start = low_length - self.clip_length + 1
+
+            for i in range(0, max_start, step_size):
+                if i + self.clip_length > low_length:
+                    break
+
+                low_slice = self.low_res_data[
+                    low_cursor + i : low_cursor + i + self.clip_length
+                ]
+                self.clips_low.append(low_slice)
+
+                start_high = high_cursor + i * self.temporal_downsample
+                end_high = start_high + self.clip_length * self.temporal_downsample
+                high_indices = torch.arange(start_high, end_high, self.temporal_downsample)
+                high_slice = self.high_res_data[high_indices].permute(0, 3, 1, 2)
+                self.clips_high.append(high_slice)
+
+            low_cursor += low_length
+            high_cursor += high_length
 
         print(f"Created {len(self.clips_low)} clips for {self.split} split")
         
