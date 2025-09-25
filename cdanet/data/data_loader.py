@@ -139,6 +139,10 @@ class RBDataModule:
             f"rb_data_Ra_{int(Ra)}.h5",
             f"rb_data_{Ra:.0e}.h5",
             f"rb_data_{int(Ra)}.h5",
+            f"rb2d_ra{Ra:.0e}_consolidated.h5",
+            f"rb2d_ra{int(Ra)}_consolidated.h5",
+            f"rb2d_ra{Ra:.0e}.h5",
+            f"rb2d_ra{int(Ra)}.h5",
             f"Ra_{Ra:.0e}.h5",
             f"Ra_{int(Ra)}.h5",
             "rb_simulation_data.h5"  # Default name

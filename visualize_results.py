@@ -4,7 +4,7 @@ Create publication-quality visualizations for CDAnet results.
 Generates the classic Rayleigh-Bénard convection comparison plots.
 
 Usage:
-    python visualize_results.py --checkpoint checkpoints/best_model.pth --data_dir ./rb_data_final
+    python visualize_results.py --checkpoint checkpoints/best_model.pth --data_dir ./rb_data_numerical
     python visualize_results.py --demo  # Create demo visualization
 """
 
@@ -27,8 +27,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Create CDAnet visualizations')
     
     parser.add_argument('--checkpoint', type=str, help='Path to trained model checkpoint')
-    parser.add_argument('--data_dir', type=str, default='./rb_data_final',
-                       help='Directory containing test data')
+    parser.add_argument('--data_dir', type=str, default=None,
+                       help='Directory containing test data (auto-detected if omitted)')
     parser.add_argument('--output_dir', type=str, default='./visualizations',
                        help='Output directory for visualizations')
     
@@ -61,7 +61,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_model_and_predict(checkpoint_path: str, data_path: str, Ra: float,
+def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
                           spatial_downsample: int, temporal_downsample: int) -> dict:
     """Load trained model and generate predictions."""
     
@@ -138,7 +138,7 @@ def load_model_and_predict(checkpoint_path: str, data_path: str, Ra: float,
 
     print(f"Setting up data with normalize={normalize_data}")
     data_module = RBDataModule(
-        data_dir=os.path.dirname(data_path),
+        data_dir=data_dir,
         spatial_downsample=spatial_downsample,
         temporal_downsample=temporal_downsample,
         batch_size=1,
@@ -148,7 +148,12 @@ def load_model_and_predict(checkpoint_path: str, data_path: str, Ra: float,
     data_module.setup([Ra])
     
     # Get test data
-    test_loader = data_module.get_dataloader(Ra, 'test')
+    try:
+        test_loader = data_module.get_dataloader(Ra, 'test')
+    except KeyError as exc:
+        raise FileNotFoundError(
+            f"No data available for Ra={Ra:.0e}. Place the corresponding .h5 files under {data_dir} or use --data_dir to point to the dataset."
+        ) from exc
 
     print(f"🔍 Debug Info:")
     print(f"  Test loader batches: {len(test_loader)}")
@@ -457,6 +462,35 @@ def main():
     print("=" * 60)
     
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Resolve data directory when not explicitly provided
+    candidate_dirs = []
+    if args.data_dir:
+        candidate_dirs.append(args.data_dir)
+    candidate_dirs.extend(['./rb_data_numerical', './rb_data_final', './rb_data'])
+
+    seen = set()
+    resolved_dir = None
+    for candidate in candidate_dirs:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate and os.path.isdir(candidate):
+            if args.data_dir and os.path.abspath(candidate) != os.path.abspath(args.data_dir):
+                print(f"⚠️ Requested data directory {args.data_dir} not found. Using {candidate} instead.")
+            else:
+                print(f"📂 Using data directory: {candidate}")
+            resolved_dir = candidate
+            break
+
+    if resolved_dir is None:
+        if args.data_dir:
+            print(f"⚠️ Requested data directory {args.data_dir} not found. Continuing with {candidate_dirs[0]} (may fail).")
+        else:
+            print("⚠️ Could not auto-detect data directory. Set --data_dir to the folder containing RB .h5 data files.")
+        resolved_dir = candidate_dirs[0]
+
+    args.data_dir = resolved_dir
     
     # Get data
     if args.demo:
@@ -464,9 +498,8 @@ def main():
         results = create_demo_data()
     elif args.checkpoint:
         print(f"Loading model from {args.checkpoint}")
-        data_file = os.path.join(args.data_dir, f'rb_data_Ra_{args.Ra:.0e}.h5')
         results = load_model_and_predict(
-            args.checkpoint, data_file, args.Ra,
+            args.checkpoint, args.data_dir, args.Ra,
             args.spatial_downsample, args.temporal_downsample
         )
     else:
