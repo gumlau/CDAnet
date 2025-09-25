@@ -68,6 +68,15 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     print(f"🔍 Checkpoint keys: {list(checkpoint.keys())}")
+    for key in ['epoch', 'best_loss', 'best_metric', 'train_loss', 'eval_loss']:
+        if key in checkpoint:
+            value = checkpoint[key]
+            if isinstance(value, (list, tuple)):
+                preview = value[:3]
+                tail = value[-3:] if len(value) > 3 else []
+                print(f"  {key}: len={len(value)} first={preview} last={tail if tail else preview}")
+            else:
+                print(f"  {key}: {value}")
 
     # Create CDAnet model with reference architecture
     print("🔧 Creating CDAnet model with reference architecture...")
@@ -176,6 +185,9 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
     if torch.cuda.is_available():
         print(f"  GPU Memory after model load: {torch.cuda.memory_allocated()/1024**3:.2f} GB allocated")
     
+    dataset_to_model_order = torch.tensor([1, 0, 2, 3], device=device, dtype=torch.long)
+    model_to_dataset_order = torch.tensor([1, 0, 2, 3], device=device, dtype=torch.long)
+
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
             print(f"🔍 Processing batch {i+1}/{len(test_loader)}")
@@ -188,6 +200,9 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
             coords = batch['coords'].to(device, non_blocking=True)
             targets = batch['targets'].to(device, non_blocking=True)
             high_res = batch.get('high_res')
+
+            # Reorder channels to match training order [p, b, u, w]
+            low_res_for_model = low_res.index_select(1, dataset_to_model_order)
 
             # Log memory usage for the problematic batch
             if torch.cuda.is_available():
@@ -224,7 +239,9 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
                 coord_chunk = coords[:, i:end_idx, :]  # [1, chunk_size, 3]
 
                 with torch.no_grad():  # Save memory during inference
-                    pred_chunk = model(low_res, coord_chunk)
+                    pred_chunk = model(low_res_for_model, coord_chunk)
+                    # Convert predictions back to dataset order [T, p, u, v]
+                    pred_chunk = pred_chunk.index_select(-1, model_to_dataset_order)
                     predictions_list.append(pred_chunk.cpu())  # Move to CPU immediately
 
                 # Clear GPU cache
