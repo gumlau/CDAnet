@@ -284,16 +284,34 @@ def train_one_epoch(args, unet, imnet, train_loader, epoch, global_step, device,
         # Define forward function for PDE layer
         pde_fwd_fn = lambda points: query_local_implicit_grid(imnet, latent_grid, points, xmin, xmax)
 
-        # Update PDE layer and compute predictions + residues
+        # Update PDE layer
         pde_layer.update_forward_method(pde_fwd_fn)
-        pred_value, residue_dict = pde_layer(point_coord, return_residue=True)
 
-        # Function value regression loss
-        reg_loss = criterion(pred_value, point_value)
+        # Chunked evaluation to reduce memory footprint
+        total_points = point_coord.shape[1]
+        chunk_size = args.pde_chunk_size if args.pde_chunk_size and args.pde_chunk_size > 0 else total_points
 
-        # PDE residue loss
-        pde_tensors = torch.stack([d for d in residue_dict.values()], dim=0)
-        pde_loss = criterion(pde_tensors, torch.zeros_like(pde_tensors))
+        reg_loss = torch.zeros(1, device=device)
+        pde_loss = torch.zeros(1, device=device)
+
+        for start in range(0, total_points, chunk_size):
+            end = min(start + chunk_size, total_points)
+            weight = (end - start) / total_points
+
+            coord_chunk = point_coord[:, start:end, :]
+            value_chunk = point_value[:, start:end, :]
+
+            pred_chunk, residue_dict = pde_layer(coord_chunk, return_residue=True)
+
+            reg_chunk = criterion(pred_chunk, value_chunk)
+            pde_tensor = torch.stack([d for d in residue_dict.values()], dim=0)
+            pde_chunk = criterion(pde_tensor, torch.zeros_like(pde_tensor))
+
+            reg_loss = reg_loss + reg_chunk * weight
+            pde_loss = pde_loss + pde_chunk * weight
+
+        reg_loss = reg_loss.squeeze(0)
+        pde_loss = pde_loss.squeeze(0)
 
         # Total loss
         total_loss = reg_loss + args.alpha_pde * pde_loss
@@ -494,6 +512,8 @@ def parse_args():
     parser.add_argument('--velocityOnly', action='store_true', help='Use velocity observations only')
     parser.add_argument('--n_samp_pts_per_crop', type=int, default=1024,
                        help='Sample points per crop')
+    parser.add_argument('--pde_chunk_size', type=int, default=256,
+                       help='Number of PDE points processed per chunk (0 disables chunking)')
 
     parser.add_argument('--normalize_channels', dest='normalize_channels', action='store_true',
                        help='Normalize data channels (default: True)')
