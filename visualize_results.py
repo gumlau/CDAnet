@@ -187,6 +187,7 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
             low_res = batch['low_res'].to(device, non_blocking=True)
             coords = batch['coords'].to(device, non_blocking=True)
             targets = batch['targets'].to(device, non_blocking=True)
+            high_res = batch.get('high_res')
 
             # Log memory usage for the problematic batch
             if torch.cuda.is_available():
@@ -324,53 +325,27 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
             # With spatial_downsample=4: low-res becomes (time_steps, 43, 128, 4)
             # With temporal_downsample=4: clip becomes 8 timesteps
 
-            # Calculate dimensions
-            B_lr, C_lr, T_lr, H_lr, W_lr = low_res.shape
-            H_hr = H_lr * spatial_downsample
-            W_hr = W_lr * spatial_downsample
-            T_hr = T_lr * temporal_downsample
+            # Infer spatial dimensions directly from the batch
+            if high_res is not None:
+                B_hr, C_hr, T_hr, H_hr, W_hr = high_res.shape
+                assert B_hr == B, "Batch size mismatch between high_res and coordinates"
+            else:
+                # Fallback to low-res metadata when high-res is unavailable
+                B_lr, C_lr, T_lr, H_lr, W_lr = low_res.shape
+                T_hr = T_lr
+                H_hr = H_lr * spatial_downsample
+                W_hr = W_lr * spatial_downsample
 
-            # Handle dimension mismatch
-            if T_hr * H_hr * W_hr != N:
-                # Find best factorization
-                for test_T in [8, 4, 16, 32]:
-                    spatial_points = N // test_T
-                    if N % test_T == 0:
-                        computed_H = H_lr * spatial_downsample
-                        computed_W = W_lr * spatial_downsample
-                        if computed_H * computed_W == spatial_points:
-                            T_hr, H_hr, W_hr = test_T, computed_H, computed_W
-                            break
+            expected_points = T_hr * H_hr * W_hr
+            assert expected_points == N, (
+                f"Mismatch when reshaping predictions (expected {expected_points} points, got {N}). "
+                f"Check clip_length and downsample settings."
+            )
 
             print(f"  Using dimensions: T={T_hr}, H={H_hr}, W={W_hr}")
 
-            # Try different reshape orders to find the correct data layout
-            target_reshaped_v1 = targets.view(B, T_hr, H_hr, W_hr, C)
-            target_reshaped_v2 = targets.view(B, H_hr, W_hr, T_hr, C).permute(0, 3, 1, 2, 4) if T_hr * H_hr * W_hr == N else target_reshaped_v1
-            target_reshaped_v3 = targets.view(B, W_hr, H_hr, T_hr, C).permute(0, 3, 2, 1, 4) if T_hr * H_hr * W_hr == N else target_reshaped_v1
-
-            # Calculate variance for each to find best layout
-            def calc_variance(reshaped):
-                first_frame = reshaped[0, 0, :, :, 0]
-                return first_frame.var(dim=1).mean().item() + first_frame.var(dim=0).mean().item()
-
-            vars_and_shapes = [
-                (calc_variance(target_reshaped_v1), target_reshaped_v1, "T,H,W"),
-                (calc_variance(target_reshaped_v2), target_reshaped_v2, "H,W,T"),
-                (calc_variance(target_reshaped_v3), target_reshaped_v3, "W,H,T")
-            ]
-
-            # Choose version with highest variance (most structure)
-            best_var, target_reshaped, best_order = max(vars_and_shapes, key=lambda x: x[0])
-            print(f"  Selected reshape: {best_order} (variance={best_var:.3f})")
-
-            # Apply same reshaping to predictions
-            if best_order == "H,W,T":
-                pred_reshaped = predictions.view(B, H_hr, W_hr, T_hr, C).permute(0, 3, 1, 2, 4)
-            elif best_order == "W,H,T":
-                pred_reshaped = predictions.view(B, W_hr, H_hr, T_hr, C).permute(0, 3, 2, 1, 4)
-            else:
-                pred_reshaped = predictions.view(B, T_hr, H_hr, W_hr, C)
+            target_reshaped = targets.view(B, T_hr, H_hr, W_hr, C)
+            pred_reshaped = predictions.view(B, T_hr, H_hr, W_hr, C)
 
             # 🔧 FIXED: Also denormalize low-res input for fair comparison
             low_res_cpu = low_res.cpu().permute(0, 2, 3, 4, 1)  # [B, T, H, W, C]
