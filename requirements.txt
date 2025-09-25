@@ -1,0 +1,19 @@
+# Core dependencies (CUDA-compatible versions)
+numpy>=1.20.0
+scipy>=1.7.0
+h5py>=3.1.0
+matplotlib>=3.3.0
+seaborn>=0.11.0
+tqdm>=4.60.0
+PyYAML>=5.4.0
+
+# Optional dependencies
+tensorboard>=2.7.0
+wandb>=0.12.0
+
+# For data processing
+scikit-learn>=0.24.0
+pandas>=1.3.0
+
+# Note: PyTorch with CUDA should be installed separately:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
