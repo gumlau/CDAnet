@@ -291,10 +291,11 @@ def train_one_epoch(args, unet, imnet, train_loader, epoch, global_step, device,
         total_points = point_coord.shape[1]
         chunk_size = args.pde_chunk_size if args.pde_chunk_size and args.pde_chunk_size > 0 else total_points
 
-        reg_loss = torch.zeros(1, device=device)
-        pde_loss = torch.zeros(1, device=device)
+        reg_loss_val = 0.0
+        pde_loss_val = 0.0
+        num_chunks = int(np.ceil(total_points / chunk_size))
 
-        for start in range(0, total_points, chunk_size):
+        for chunk_idx, start in enumerate(range(0, total_points, chunk_size)):
             end = min(start + chunk_size, total_points)
             weight = (end - start) / total_points
 
@@ -307,17 +308,14 @@ def train_one_epoch(args, unet, imnet, train_loader, epoch, global_step, device,
             pde_tensor = torch.stack([d for d in residue_dict.values()], dim=0)
             pde_chunk = criterion(pde_tensor, torch.zeros_like(pde_tensor))
 
-            reg_loss = reg_loss + reg_chunk * weight
-            pde_loss = pde_loss + pde_chunk * weight
+            total_chunk = (reg_chunk + args.alpha_pde * pde_chunk) * weight
+            retain_graph = chunk_idx < num_chunks - 1
+            total_chunk.backward(retain_graph=retain_graph)
 
-        reg_loss = reg_loss.squeeze(0)
-        pde_loss = pde_loss.squeeze(0)
+            reg_loss_val += reg_chunk.item() * weight
+            pde_loss_val += pde_chunk.item() * weight
 
-        # Total loss
-        total_loss = reg_loss + args.alpha_pde * pde_loss
-
-        # Backward pass
-        total_loss.backward()
+        total_loss_value = reg_loss_val + args.alpha_pde * pde_loss_val
 
         # Gradient clipping
         torch.nn.utils.clip_grad_value_(list(unet.parameters()) + list(imnet.parameters()), args.clip_grad)
@@ -325,15 +323,15 @@ def train_one_epoch(args, unet, imnet, train_loader, epoch, global_step, device,
         optimizer.step()
 
         # Logging
-        metric_logger.update(loss=total_loss.item())
-        metric_logger.update(reg_loss=reg_loss.item())
-        metric_logger.update(pde_loss=pde_loss.item())
+        metric_logger.update(loss=total_loss_value)
+        metric_logger.update(reg_loss=reg_loss_val)
+        metric_logger.update(pde_loss=pde_loss_val)
         metric_logger.update(lr=optimizer.param_groups[0]['lr'])
 
         if batch_idx % args.log_interval == 0 and utilities.is_main_process():
-            writer.add_scalar('train/reg_loss', reg_loss.item(), global_step=global_step[0])
-            writer.add_scalar('train/pde_loss', pde_loss.item(), global_step=global_step[0])
-            writer.add_scalar('train/total_loss', total_loss.item(), global_step=global_step[0])
+            writer.add_scalar('train/reg_loss', reg_loss_val, global_step=global_step[0])
+            writer.add_scalar('train/pde_loss', pde_loss_val, global_step=global_step[0])
+            writer.add_scalar('train/total_loss', total_loss_value, global_step=global_step[0])
 
         global_step[0] += 1
 
