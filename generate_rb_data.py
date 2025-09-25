@@ -337,11 +337,14 @@ def visualize_data(output_file):
 def main():
     parser = argparse.ArgumentParser(description='Generate stable Rayleigh-Bénard data')
     parser.add_argument('--Ra', type=float, default=1e5, help='Rayleigh number')
-    parser.add_argument('--n_runs', type=int, default=5, help='Number of runs')
-    parser.add_argument('--n_samples', type=int, default=50, help='Samples per run')
+    parser.add_argument('--n_runs', type=int, default=25,
+                        help='Number of independent runs (default matches CDAnet paper: 20 train + 5 val)')
+    parser.add_argument('--n_samples', type=int, default=200,
+                        help='Snapshots per run (default spans t∈[25,45] with Δt=0.1, as in CDAnet paper)')
     parser.add_argument('--nx', type=int, default=256, help='Grid points in x (high resolution)')
     parser.add_argument('--ny', type=int, default=256, help='Grid points in y (high resolution)')
-    parser.add_argument('--dt', type=float, default=0.05, help='Time step between samples')
+    parser.add_argument('--dt', type=float, default=0.1,
+                        help='Time step between saved samples (0.1 matches paper sampling)')
     parser.add_argument('--save_path', type=str, default='rb_data_numerical', help='Save directory')
     parser.add_argument('--visualize', action='store_true', help='Create visualizations')
 

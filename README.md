@@ -4,7 +4,7 @@
 
 ```bash
 # 1. 生成多样化数据（解决水平条纹）
-python3 generate_rb_data.py --n_runs 20 --n_samples 50 --Ra 1e5 --save_path rb_data_final
+python3 generate_rb_data.py --Ra 1e5 --n_runs 25 --n_samples 200 --save_path rb_data_final
 
 # 2. CUDA训练（批次4，采样点4096）
 python3 train_cdanet_low_memory.py --epochs 50 --data_folder rb_data_final --train_data rb2d_ra1e+05_consolidated.h5 --eval_data rb2d_ra1e+05_consolidated.h5
