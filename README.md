@@ -168,11 +168,11 @@ python train_paper_config.py  # Ra=1e5 (default)
 
 ### Quick Data Generation (Recommended)
 ```bash
-# Generate stable RB simulation data with physics-informed time evolution
-python generate_rb_data.py --Ra 1e5 --n_runs 5 --n_samples 50 --visualize
+# Generate paper-scale RB dataset (matches Hammoud et al. 2022)
+python generate_rb_data.py --Ra 1e5 --n_runs 25 --n_samples 200 --dt 0.1 --visualize
 ```
 
-**Features:**
+**Features (paper-matched defaults):**
 - ✅ **Stable analytical patterns** with proper time evolution
 - ✅ **Multi-scale convection** structures (large/medium scale rolls)
 - ✅ **Physics-informed** velocity fields from stream functions
@@ -183,11 +183,12 @@ python generate_rb_data.py --Ra 1e5 --n_runs 5 --n_samples 50 --visualize
 ### Advanced Data Generation
 ```bash
 # Different Rayleigh numbers
-python generate_rb_data.py --Ra 1e6 --n_runs 10 --n_samples 100
-python generate_rb_data.py --Ra 1e7 --n_runs 5 --n_samples 75
+python generate_rb_data.py --Ra 1e6 --n_runs 25 --n_samples 400 --dt 0.05
+python generate_rb_data.py --Ra 1e7 --n_runs 25 --n_samples 400 --dt 0.05
 
 # Custom parameters
-python generate_rb_data.py --Ra 1e5 --n_runs 3 --n_samples 25 --no-visualize
+# (e.g., smaller quick test set)
+python generate_rb_data.py --Ra 1e5 --n_runs 5 --n_samples 50 --no-visualize
 ```
 
 ### Legacy Data Generation
