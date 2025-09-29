@@ -12,6 +12,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import os
 import sys
 import argparse
+import json
 
 # 添加项目路径
 sys.path.append('.')
@@ -20,12 +21,30 @@ sys.path.append('.')
 from cdanet.models import CDAnet
 from cdanet.data import RBDataModule
 
+DATASET_TO_MODEL = torch.tensor([1, 0, 2, 3], dtype=torch.long)
+MODEL_TO_DATASET = torch.tensor([1, 0, 2, 3], dtype=torch.long)
+
 def load_model_from_checkpoint(checkpoint_path, device='cuda'):
     """从检查点加载模型"""
     print(f"从检查点加载模型: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model_config = checkpoint['model_config']
+
+    if 'model_config' in checkpoint:
+        model_config = checkpoint['model_config']
+    else:
+        model_config = {
+            'in_channels': 4,
+            'feature_channels': 32,
+            'mlp_hidden_dims': [32, 32],
+            'activation': 'softplus',
+            'coord_dim': 3,
+            'output_dim': 4,
+            'igres': (4, 64, 64),
+            'unet_nf': 16,
+            'unet_mf': 256,
+            'imnet_nf': 32
+        }
 
     # 创建模型
     model = CDAnet(
@@ -41,7 +60,13 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
         imnet_nf=model_config.get('imnet_nf', None)
     )
 
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    elif 'unet_state_dict' in checkpoint and 'imnet_state_dict' in checkpoint:
+        model.feature_extractor.load_state_dict(checkpoint['unet_state_dict'])
+        model.implicit_net.load_state_dict(checkpoint['imnet_state_dict'])
+    else:
+        raise KeyError('Checkpoint missing model weights: expected model_state_dict or unet/imnet state dicts')
     model.to(device)
     model.eval()
 
@@ -55,14 +80,15 @@ def setup_simple_data_module(data_dir, Ra_numbers=[1e5]):
     data_module = RBDataModule(
         data_dir=data_dir,
         batch_size=1,
-        normalize=True
+        normalize=True,
+        num_workers=0
     )
     data_module.setup(Ra_numbers=Ra_numbers)
 
     print(f"✅ 数据模块设置完成")
     return data_module
 
-def comprehensive_evaluation(model, data_module, device='cuda'):
+def comprehensive_evaluation(model, data_module, device='cuda', max_batches=5):
     """全面的模型评估"""
 
     print("🔬 开始详细量化评估...")
@@ -75,6 +101,9 @@ def comprehensive_evaluation(model, data_module, device='cuda'):
 
     # 测试不同Ra数
     Ra_numbers = [1e5]
+
+    dataset_to_model = DATASET_TO_MODEL.to(device)
+    model_to_dataset = MODEL_TO_DATASET.to(device)
 
     for Ra in Ra_numbers:
         print(f"\n📊 评估 Ra = {Ra:.0e}")
@@ -90,7 +119,7 @@ def comprehensive_evaluation(model, data_module, device='cuda'):
 
         with torch.no_grad():
             for i, batch in enumerate(test_loader):
-                if i >= 5:  # 限制批次数避免过长
+                if i >= max_batches:  # 限制批次数避免过长
                     break
 
                 print(f"  处理批次 {i+1}...")
@@ -104,11 +133,14 @@ def comprehensive_evaluation(model, data_module, device='cuda'):
                 chunk_size = 4096
                 predictions_list = []
 
+                low_res_reordered = low_res.index_select(1, dataset_to_model)
+
                 for j in range(0, num_coords, chunk_size):
                     end_idx = min(j + chunk_size, num_coords)
                     coord_chunk = coords[:, j:end_idx, :]
 
-                    pred_chunk = model(low_res, coord_chunk)
+                    pred_chunk = model(low_res_reordered, coord_chunk)
+                    pred_chunk = pred_chunk.index_select(-1, model_to_dataset)
                     predictions_list.append(pred_chunk.cpu())
 
                     if torch.cuda.is_available():
@@ -342,7 +374,8 @@ def diagnose_model_issues(all_predictions, all_targets):
 def main():
     parser = argparse.ArgumentParser(description='详细量化评估')
     parser.add_argument('--checkpoint', required=True, help='模型检查点路径')
-    parser.add_argument('--data_dir', default='./rb_data_final', help='数据目录')
+    parser.add_argument('--data_dir', default='./rb_data_numerical', help='数据目录')
+    parser.add_argument('--max_batches', type=int, default=5, help='每个Ra评估的最大批次数')
 
     args = parser.parse_args()
 
@@ -360,13 +393,25 @@ def main():
 
         # 详细评估
         all_metrics, all_predictions, all_targets = comprehensive_evaluation(
-            model, data_module, device)
+            model, data_module, device, max_batches=args.max_batches)
 
         # 创建详细图表
         create_detailed_plots(all_predictions, all_targets)
 
         # 诊断问题
         diagnose_model_issues(all_predictions, all_targets)
+
+        # 保存指标快照
+        os.makedirs('./detailed_analysis', exist_ok=True)
+        summary = {}
+        for Ra, metrics in all_metrics.items():
+            summary[str(Ra)] = {}
+            for key, values in metrics.items():
+                if len(values):
+                    summary[str(Ra)][key] = float(np.mean(values))
+
+        with open('./detailed_analysis/metrics_summary.json', 'w') as f:
+            json.dump(summary, f, indent=2)
 
         print(f"\n🎉 详细评估完成!")
         print(f"📁 结果保存在: ./detailed_analysis/")

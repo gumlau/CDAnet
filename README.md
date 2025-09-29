@@ -72,9 +72,12 @@ Adjust hyper-parameters based on available compute (e.g., `--batch_size`, `--n_s
 ```bash
 python3 evaluate_cdanet.py --checkpoint ./outputs/checkpoint_best.pth
 python3 visualize_results.py --checkpoint ./outputs/checkpoint_best.pth --variable T
+python3 quantitative_evaluation.py --checkpoint ./outputs/checkpoint_best.pth --data_dir ./rb_data_numerical
 ```
 
-`visualize_results.py` automatically resolves the dataset path, handles channel-order alignment, and produces comparison, temporal evolution, and error plots in `./visualizations/`.
+- `evaluate_cdanet.py` prints dataset-level metrics (RRMSE, MAE, etc.) and can export logs for additional splits.
+- `visualize_results.py` resolves the dataset path automatically, aligns channel order, and renders comparison / temporal plots in `./visualizations/`.
+- `quantitative_evaluation.py` now denormalizes predictions, computes detailed statistics, saves diagnostic plots, and exports `detailed_analysis/metrics_summary.json`.
 
 ## Requirements
 

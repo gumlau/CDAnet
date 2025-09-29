@@ -75,13 +75,22 @@ def load_model_and_config(checkpoint_path: str, config_path: str = None) -> tupl
         config = ExperimentConfig()
         config.update_from_dict(config_dict)
     elif 'config' in checkpoint:
-        # Try to load config from checkpoint
         config = ExperimentConfig()
         config.update_from_dict(checkpoint['config'])
     else:
-        # Create default config (may not work perfectly)
         print("Warning: Using default configuration - results may be suboptimal")
         config = ExperimentConfig()
+        if 'model_config' in checkpoint:
+            config.model.in_channels = checkpoint['model_config'].get('in_channels', config.model.in_channels)
+            config.model.feature_channels = checkpoint['model_config'].get('feature_channels', config.model.feature_channels)
+            config.model.mlp_hidden_dims = checkpoint['model_config'].get('mlp_hidden_dims', config.model.mlp_hidden_dims)
+            config.model.activation = checkpoint['model_config'].get('activation', config.model.activation)
+            config.model.coord_dim = checkpoint['model_config'].get('coord_dim', config.model.coord_dim)
+            config.model.output_dim = checkpoint['model_config'].get('output_dim', config.model.output_dim)
+            config.model.igres = tuple(checkpoint['model_config'].get('igres', config.model.igres))
+            config.model.unet_nf = checkpoint['model_config'].get('unet_nf', config.model.unet_nf)
+            config.model.unet_mf = checkpoint['model_config'].get('unet_mf', config.model.unet_mf)
+            config.model.imnet_nf = checkpoint['model_config'].get('imnet_nf', config.model.imnet_nf)
     
     # Create model
     model = CDAnet(
@@ -98,8 +107,14 @@ def load_model_and_config(checkpoint_path: str, config_path: str = None) -> tupl
     )
     
     # Load model weights
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    elif 'unet_state_dict' in checkpoint and 'imnet_state_dict' in checkpoint:
+        model.feature_extractor.load_state_dict(checkpoint['unet_state_dict'])
+        model.implicit_net.load_state_dict(checkpoint['imnet_state_dict'])
+    else:
+        raise KeyError('Checkpoint missing model weights: expected model_state_dict or unet/imnet state dicts')
+
     return model, config, checkpoint
 
 
@@ -125,7 +140,10 @@ def main():
     
     config.evaluation.eval_batch_size = args.batch_size
     config.evaluation.save_predictions = args.save_predictions
-    config.evaluation.compute_physics_loss = args.physics_analysis
+    compute_physics = args.physics_analysis and hasattr(model, 'forward_with_derivatives')
+    if args.physics_analysis and not compute_physics:
+        print("Warning: forward_with_derivatives not implemented; skipping physics analysis")
+    config.evaluation.compute_physics_loss = compute_physics
     config.data.data_dir = args.data_dir
     
     # Move model to device

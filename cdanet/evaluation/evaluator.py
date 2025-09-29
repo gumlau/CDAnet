@@ -9,6 +9,9 @@ import os
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 
+DATASET_TO_MODEL = torch.tensor([1, 0, 2, 3], dtype=torch.long)
+MODEL_TO_DATASET = torch.tensor([1, 0, 2, 3], dtype=torch.long)
+
 from ..models.cdanet import CDAnet
 from ..data.data_loader import RBDataModule
 from ..utils.logger import Logger
@@ -221,8 +224,13 @@ class CDAnetEvaluator:
         """Make predictions for a batch."""
         low_res = batch['low_res']
         coords = batch['coords']
-        
-        predictions = self.model(low_res, coords)
+
+        reorder_in = DATASET_TO_MODEL.to(low_res.device)
+        reorder_out = MODEL_TO_DATASET.to(low_res.device)
+
+        low_res_reordered = low_res.index_select(1, reorder_in)
+        predictions = self.model(low_res_reordered, coords)
+        predictions = predictions.index_select(-1, reorder_out)
         return predictions
     
     def _compute_physics_metrics(self, batch: Dict, predictions: torch.Tensor) -> Dict[str, float]:
