@@ -19,6 +19,7 @@ from cdanet.utils.rb_visualization import RBVisualization, visualize_training_re
 from cdanet.models import CDAnet
 from cdanet.data import RBDataModule
 from cdanet.config import ExperimentConfig
+import torch.nn.functional as F
 
 # Use CDAnet models (correct implementation)
 
@@ -376,18 +377,28 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
                 B_lr, T_lr, H_lr, W_lr, C_lr = low_res_cpu.shape
                 low_res_flat = low_res_cpu.view(-1, C_lr)
                 low_res_denorm = data_module.normalizer.denormalize(low_res_flat).view(low_res_cpu.shape)
-                low_res_display = low_res_denorm
+                low_res_native = low_res_denorm
             else:
-                low_res_display = low_res_cpu
+                low_res_native = low_res_cpu
 
-            # Align mean with target to reduce bias, while preserving variance differences
-            low_res_display = low_res_display.clone()
-            for c_idx in range(C):
-                low_slice = low_res_display[0, :, :, :, c_idx]
-                target_slice = target_reshaped[0, :, :, :, c_idx]
-                low_mean = low_slice.mean().item()
-                target_mean = target_slice.mean().item()
-                low_res_display[0, :, :, :, c_idx] = low_slice + (target_mean - low_mean)
+            # Build a display-friendly low-res version by spatially averaging the high-res truth
+            target_tensor = target_reshaped.permute(0, 4, 1, 2, 3)  # [B, C, T, H, W]
+            blur = F.avg_pool3d(
+                target_tensor,
+                kernel_size=(1, spatial_downsample, spatial_downsample),
+                stride=(1, spatial_downsample, spatial_downsample)
+            )
+            blur_upsampled = F.interpolate(
+                blur,
+                size=(T_hr, H_hr, W_hr),
+                mode='trilinear',
+                align_corners=False
+            )
+            low_res_display = blur_upsampled.permute(0, 2, 3, 4, 1)
+            # Preserve original low-res channel means to match actual input distribution
+            low_res_native_mean = low_res_native.mean(dim=(1, 2, 3), keepdim=True)
+            low_res_display_mean = low_res_display.mean(dim=(1, 2, 3), keepdim=True)
+            low_res_display += (low_res_native_mean - low_res_display_mean)
 
             results['predictions'].append(pred_reshaped[0])  # [T, H, W, C]
             results['truth_fields'].append(target_reshaped[0])
