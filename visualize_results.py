@@ -364,21 +364,39 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
             target_reshaped = targets.view(B, T_hr, H_hr, W_hr, C)
             pred_reshaped = predictions.view(B, T_hr, H_hr, W_hr, C)
 
-            # 🔧 FIXED: Also denormalize low-res input for fair comparison
-            low_res_cpu = low_res.cpu().permute(0, 2, 3, 4, 1)  # [B, T, H, W, C]
+            # 🔧 Prepare low-res input for visualization: interpolate to high-res grid
+            with torch.no_grad():
+                low_res_interp = torch.nn.functional.interpolate(
+                    low_res, size=(T_hr, H_hr, W_hr), mode='trilinear', align_corners=False
+                )
 
-            # Denormalize low-res input if normalizer exists
+            low_res_cpu = low_res_interp.cpu().permute(0, 2, 3, 4, 1)  # [B, T, H, W, C]
+
             if data_module.normalizer is not None:
                 B_lr, T_lr, H_lr, W_lr, C_lr = low_res_cpu.shape
                 low_res_flat = low_res_cpu.view(-1, C_lr)
                 low_res_denorm = data_module.normalizer.denormalize(low_res_flat).view(low_res_cpu.shape)
-                low_res_reshaped = low_res_denorm
+                low_res_display = low_res_denorm
             else:
-                low_res_reshaped = low_res_cpu
+                low_res_display = low_res_cpu
+
+            # Match low-res statistics to high-res so difference is mainly blur
+            eps = 1e-6
+            low_res_display = low_res_display.clone()
+            for c_idx in range(C):
+                low_slice = low_res_display[0, :, :, :, c_idx]
+                target_slice = target_reshaped[0, :, :, :, c_idx]
+                low_std = low_slice.std().item()
+                target_std = target_slice.std().item()
+                if low_std < eps or target_std < eps:
+                    continue
+                low_mean = low_slice.mean().item()
+                target_mean = target_slice.mean().item()
+                low_res_display[0, :, :, :, c_idx] = (low_slice - low_mean) / low_std * target_std + target_mean
 
             results['predictions'].append(pred_reshaped[0])  # [T, H, W, C]
             results['truth_fields'].append(target_reshaped[0])
-            results['input_fields'].append(low_res_reshaped[0])
+            results['input_fields'].append(low_res_display[0])
     
     # Concatenate results
     for key in results:

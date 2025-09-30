@@ -72,6 +72,8 @@ def create_animation(args):
     frames = min(args.frames, n_frames_total)
 
     ds = max(1, args.downsample)
+    if ny % ds != 0 or nx % ds != 0:
+        raise ValueError(f"Grid size ({ny}, {nx}) not divisible by downsample factor {ds}")
     temp_low = temp_high[:, ::ds, ::ds]
     u_low = u_high[:, ::ds, ::ds]
     v_low = v_high[:, ::ds, ::ds]

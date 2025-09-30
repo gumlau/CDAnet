@@ -1,0 +1,4 @@
+rb_data_numerical/
+*.h5
+rb_animation.mp4
+__pycache__/
