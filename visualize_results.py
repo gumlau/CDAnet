@@ -381,21 +381,17 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
             else:
                 low_res_native = low_res_cpu
 
-            # Build a display-friendly low-res version by spatially averaging the high-res truth
+            # Build a display-friendly low-res version: sample every spatial_downsample cell
             target_tensor = target_reshaped.permute(0, 4, 1, 2, 3)  # [B, C, T, H, W]
-            blur = F.avg_pool3d(
-                target_tensor,
-                kernel_size=(1, spatial_downsample, spatial_downsample),
-                stride=(1, spatial_downsample, spatial_downsample)
-            )
+            subsampled = target_tensor[:, :, :, ::spatial_downsample, ::spatial_downsample]
             blur_upsampled = F.interpolate(
-                blur,
+                subsampled,
                 size=(T_hr, H_hr, W_hr),
                 mode='trilinear',
                 align_corners=False
             )
             low_res_display = blur_upsampled.permute(0, 2, 3, 4, 1)
-            # Preserve original low-res channel means to match actual input distribution
+            # align channel means with actual low-res input to retain overall bias
             low_res_native_mean = low_res_native.mean(dim=(1, 2, 3), keepdim=True)
             low_res_display_mean = low_res_display.mean(dim=(1, 2, 3), keepdim=True)
             low_res_display += (low_res_native_mean - low_res_display_mean)
