@@ -380,19 +380,14 @@ def load_model_and_predict(checkpoint_path: str, data_dir: str, Ra: float,
             else:
                 low_res_display = low_res_cpu
 
-            # Match low-res statistics to high-res so difference is mainly blur
-            eps = 1e-6
+            # Align mean with target to reduce bias, while preserving variance differences
             low_res_display = low_res_display.clone()
             for c_idx in range(C):
                 low_slice = low_res_display[0, :, :, :, c_idx]
                 target_slice = target_reshaped[0, :, :, :, c_idx]
-                low_std = low_slice.std().item()
-                target_std = target_slice.std().item()
-                if low_std < eps or target_std < eps:
-                    continue
                 low_mean = low_slice.mean().item()
                 target_mean = target_slice.mean().item()
-                low_res_display[0, :, :, :, c_idx] = (low_slice - low_mean) / low_std * target_std + target_mean
+                low_res_display[0, :, :, :, c_idx] = low_slice + (target_mean - low_mean)
 
             results['predictions'].append(pred_reshaped[0])  # [T, H, W, C]
             results['truth_fields'].append(target_reshaped[0])
