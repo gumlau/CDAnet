@@ -50,6 +50,22 @@ python3 generate_rb_data.py \
     --visualize
 ```
 
+### RB Data Animation
+
+Create an animation that places low-resolution temperature/velocity (left column) next to their
+high-resolution counterparts (right column):
+
+```bash
+python3 visualize_rb_data_animation.py \
+    --input rb_data_numerical/rb2d_ra1e+05_consolidated.h5 \
+    --run 0 \
+    --frames 200 \
+    --downsample 4 \
+    --output rb_animation.mp4
+```
+
+The script uses Matplotlib’s `FuncAnimation`; install `ffmpeg` or `imagemagick` locally to export `mp4`/`gif`. Adjust `--quiver_step_high` and `--quiver_step_low` if you want sparser velocity arrows.
+
 ## Training
 
 ```bash
