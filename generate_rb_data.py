@@ -13,135 +13,83 @@ import argparse
 
 
 def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0):
+    """Generate analytical Rayleigh–Bénard-like roll patterns.
+
+    The construction aims to mimic classic RB convection cells:
+        * Temperature has a vertical gradient plus convective rolls.
+        * Stream function is composed of a few sinusoidal rolls, from which
+          velocities are derived analytically.
+        * Mild stochasticity is injected through phase shifts and secondary modes
+          to diversify the dataset.
     """
-    Generate realistic RB convection patterns with diverse turbulent structures
-    Based on physical understanding with reduced regularity
-    """
+
     Lx, Ly = 3.0, 1.0
     x = np.linspace(0, Lx, nx)
     y = np.linspace(0, Ly, ny)
     X, Y = np.meshgrid(x, y)
+    x_norm = X / Lx
+    y_norm = Y / Ly
 
-    # Add run-specific randomness to break periodicity
-    np.random.seed(int(run_id * 1000 + t * 100) % 2147483647)
+    np.random.seed(int(run_id * 997 + t * 173) % 2147483647)
 
-    # Base temperature field (linear + perturbations)
-    T = 1.0 - Y / Ly
+    # --- Temperature ---
+    base_linear = 1.0 - y_norm  # hot bottom, cold top
+    n_cells = np.random.randint(2, 5)
+    phase = 0.6 * t + 0.4 * run_id
+    amp = 0.35 + 0.05 * np.random.randn()
 
-    # Generate more realistic convection with multiple scales and randomness
-    # Large-scale convection cells (less regular)
-    n_large_cells = np.random.randint(2, 5)  # 2-4 large cells
-    for i in range(n_large_cells):
-        phase_x = np.random.uniform(0, 2*np.pi)
-        phase_y = np.random.uniform(0, np.pi)
-        freq_x = np.random.uniform(1.5, 3.5)  # Variable frequency
-        amp = np.random.uniform(0.03, 0.08)   # Variable amplitude
-        omega = np.random.uniform(0.3, 0.8)   # Variable time evolution
+    convective = amp * np.sin(np.pi * y_norm) * np.cos(n_cells * np.pi * x_norm + phase)
+    secondary = 0.25 * amp * np.sin(2 * np.pi * y_norm) * np.cos((n_cells - 1) * np.pi * x_norm - 0.5 * phase)
+    tertiary = 0.1 * amp * np.sin(3 * np.pi * y_norm) * np.cos((n_cells + 1) * np.pi * x_norm + 0.3 * phase)
 
-        T += amp * np.sin(freq_x * np.pi * X / Lx + phase_x + omega * t) * \
-             np.sin(np.pi * Y / Ly + phase_y)
+    T = base_linear + convective + secondary + tertiary
+    T += 0.02 * np.sin(6 * np.pi * x_norm + 1.2 * phase) * np.sin(2 * np.pi * y_norm)
+    T += 0.01 * np.random.randn(*T.shape)  # gentle noise
 
-    # Medium-scale turbulent structures
-    n_medium_cells = np.random.randint(3, 7)  # 3-6 medium cells
-    for i in range(n_medium_cells):
-        phase_x = np.random.uniform(0, 2*np.pi)
-        phase_y = np.random.uniform(0, 2*np.pi)
-        freq_x = np.random.uniform(4, 8)      # Higher frequency
-        freq_y = np.random.uniform(1.5, 3)    # Variable y frequency
-        amp = np.random.uniform(0.015, 0.035) # Smaller amplitude
-        omega = np.random.uniform(0.8, 1.8)   # Faster evolution
+    # Enforce boundary temperatures
+    T[0, :] = 1.0
+    T[-1, :] = 0.0
 
-        T += amp * np.sin(freq_x * np.pi * X / Lx + phase_x + omega * t) * \
-             np.sin(freq_y * np.pi * Y / Ly + phase_y)
+    # --- Stream function & velocities ---
+    psi_amp = 0.18 + 0.04 * np.sin(0.5 * t + run_id)
+    psi_terms = [
+        (psi_amp, 1, n_cells, phase),
+        (0.6 * psi_amp, 2, n_cells - 1, -0.5 * phase),
+        (0.4 * psi_amp, 3, n_cells + 1, 0.35 * phase)
+    ]
 
-    # Small-scale fluctuations (breaking up regular patterns)
-    n_small_cells = np.random.randint(5, 12)  # Many small fluctuations
-    for i in range(n_small_cells):
-        phase_x = np.random.uniform(0, 2*np.pi)
-        phase_y = np.random.uniform(0, 2*np.pi)
-        freq_x = np.random.uniform(8, 16)     # High frequency
-        freq_y = np.random.uniform(3, 6)      # Higher y frequency
-        amp = np.random.uniform(0.005, 0.02)  # Small amplitude
-        omega = np.random.uniform(1.5, 3.0)   # Fast evolution
-
-        T += amp * np.sin(freq_x * np.pi * X / Lx + phase_x + omega * t) * \
-             np.cos(freq_y * np.pi * Y / Ly + phase_y)  # Mix sin/cos
-
-    # Add localized temperature anomalies (realistic thermal plumes)
-    n_plumes = np.random.randint(2, 6)
-    for i in range(n_plumes):
-        # Random plume locations
-        x_center = np.random.uniform(0.2, 0.8) * Lx
-        y_center = np.random.uniform(0.2, 0.8) * Ly
-        width_x = np.random.uniform(0.3, 0.8)
-        width_y = np.random.uniform(0.15, 0.4)
-        amplitude = np.random.uniform(0.02, 0.06)
-
-        # Gaussian-like thermal plume
-        plume = amplitude * np.exp(-((X - x_center)**2 / width_x**2 +
-                                   (Y - y_center)**2 / width_y**2))
-        # Time modulation
-        time_mod = np.sin(np.random.uniform(0.5, 2.0) * t + np.random.uniform(0, 2*np.pi))
-        T += plume * time_mod
-
-    # Apply boundary conditions
-    T[0, :] = 1.0   # Hot bottom
-    T[-1, :] = 0.0  # Cold top
-
-    # Generate diverse velocity fields from stream function
     psi = np.zeros_like(X)
-
-    # Multiple circulation patterns with randomness
-    n_circulations = np.random.randint(2, 5)
-    for i in range(n_circulations):
-        phase_x = np.random.uniform(0, 2*np.pi)
-        phase_y = np.random.uniform(0, np.pi)
-        freq_x = np.random.uniform(1, 4)      # Variable circulation size
-        freq_y = np.random.uniform(0.5, 2)    # Variable vertical structure
-        amp = np.random.uniform(0.1, 0.4)     # Variable strength
-        omega = np.random.uniform(0.2, 1.0)   # Variable time evolution
-
-        psi += amp * np.sin(freq_x * np.pi * X / Lx + phase_x + omega * t) * \
-               np.sin(freq_y * np.pi * Y / Ly + phase_y)
-
-    # u = -∂ψ/∂y, v = ∂ψ/∂x
     u = np.zeros_like(X)
     v = np.zeros_like(X)
 
-    # Compute derivatives numerically
-    dy = y[1] - y[0]
-    dx = x[1] - x[0]
+    for amp_i, ay, ax, phi in psi_terms:
+        if ax <= 0:
+            continue
+        sin_y = np.sin(ay * np.pi * y_norm)
+        cos_y = np.cos(ay * np.pi * y_norm)
+        sin_x = np.sin(ax * np.pi * x_norm + phi)
+        cos_x = np.cos(ax * np.pi * x_norm + phi)
 
-    # u = -∂ψ/∂y
-    u[1:-1, :] = -(psi[2:, :] - psi[:-2, :]) / (2 * dy)
-    # v = ∂ψ/∂x
-    v[:, 1:-1] = (psi[:, 2:] - psi[:, :-2]) / (2 * dx)
+        psi += amp_i * sin_y * sin_x
+        u += -amp_i * (ay * np.pi / Ly) * cos_y * sin_x
+        v += amp_i * (ax * np.pi / Lx) * sin_y * cos_x
 
-    # Apply no-slip boundary conditions
+    # Add small-scale swirling perturbation for diversity
+    swirl = 0.02 * np.sin(5 * np.pi * x_norm + phase) * np.sin(3 * np.pi * y_norm - 0.4 * phase)
+    u += swirl
+    v += 0.5 * swirl
+
+    # Enforce boundary conditions
     u[0, :] = u[-1, :] = 0.0
     v[0, :] = v[-1, :] = 0.0
-
-    # Periodic in x
     u[:, 0] = u[:, -1]
     v[:, 0] = v[:, -1]
 
-    # Generate pressure field from continuity and momentum
-    p = np.zeros_like(X)
-    # Hydrostatic pressure
-    p = -0.1 * Y + 0.5
-
-    # Add dynamic pressure from velocity gradients
-    # ∇²p = -ρ(∂u/∂x ∂v/∂y - ∂u/∂y ∂v/∂x)
-    dudx = np.gradient(u, axis=1) / dx
-    dvdy = np.gradient(v, axis=0) / dy
-    dudy = np.gradient(u, axis=0) / dy
-    dvdx = np.gradient(v, axis=1) / dx
-
-    p += -0.2 * (dudx * dvdy - dudy * dvdx)
-
-    # Add small time-dependent pressure fluctuations
-    omega_p = np.random.uniform(0.5, 1.5)  # Random pressure oscillation
-    p += 0.1 * np.sin(2 * np.pi * X / Lx + omega_p * t * 1.5) * np.cos(np.pi * Y / Ly)
+    # --- Pressure ---
+    base_pressure = 0.5 - 0.12 * (T - T.mean())
+    pressure_rolls = 0.05 * np.cos(n_cells * np.pi * x_norm + phase) * np.cos(np.pi * y_norm)
+    p = base_pressure + pressure_rolls
+    p += 0.01 * np.random.randn(*p.shape)
 
     return T, u, v, p
 
