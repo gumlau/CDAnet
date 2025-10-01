@@ -12,7 +12,64 @@ import matplotlib.pyplot as plt
 import argparse
 
 
-def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0):
+def initialize_run_parameters(run_id: int, Ra: float, nx: int, ny: int) -> dict:
+    """Create smooth, time-coherent parameters for one RB run."""
+    rng = np.random.RandomState(run_id)
+
+    n_base_cells = rng.randint(2, 5)
+    base_phase = rng.uniform(0, 2 * np.pi)
+
+    # Temperature convection modes
+    temp_modes = []
+    for k in range(3):
+        ax = max(1, n_base_cells + rng.randint(-1, 2))
+        ay = k + 1
+        amp = 0.28 / ay * (1 + 0.1 * rng.randn())
+        phase0 = base_phase + rng.uniform(-np.pi, np.pi)
+        omega = 0.15 * (k + 1) * (1 + 0.1 * rng.randn())
+        temp_modes.append(dict(ax=ax, ay=ay, amp=amp, phase0=phase0, omega=omega))
+
+    # Stream function modes (used for velocities)
+    psi_modes = []
+    for k in range(2):
+        ax = max(1, n_base_cells + rng.randint(-1, 2))
+        ay = k + 1
+        amp = 0.2 / ay * (1 + 0.1 * rng.randn())
+        phase0 = base_phase + rng.uniform(-np.pi, np.pi)
+        omega = 0.12 * (k + 1) * (1 + 0.1 * rng.randn())
+        psi_modes.append(dict(ax=ax, ay=ay, amp=amp, phase0=phase0, omega=omega))
+
+    swirl = dict(
+        amp=0.03 * (1 + 0.1 * rng.randn()),
+        ax=n_base_cells + 1,
+        ay=2,
+        phase0=rng.uniform(0, 2 * np.pi),
+        omega=0.3 * (1 + 0.1 * rng.randn())
+    )
+
+    pressure_modes = []
+    for k in range(2):
+        pressure_modes.append(dict(
+            ax=max(1, n_base_cells + k),
+            ay=k + 1,
+            amp=0.06 / (k + 1),
+            phase0=rng.uniform(0, 2 * np.pi),
+            omega=0.18 * (1 + 0.1 * rng.randn())
+        ))
+
+    return dict(
+        temp_modes=temp_modes,
+        psi_modes=psi_modes,
+        swirl=swirl,
+        pressure_modes=pressure_modes,
+        noise_amp=0.01,
+        base_cells=n_base_cells,
+        base_phase=base_phase
+    )
+
+
+def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0,
+                            run_params=None):
     """Generate analytical Rayleigh–Bénard-like roll patterns.
 
     The construction aims to mimic classic RB convection cells:
@@ -29,55 +86,53 @@ def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0):
     X, Y = np.meshgrid(x, y)
     x_norm = X / Lx
     y_norm = Y / Ly
-
-    np.random.seed(int(run_id * 997 + t * 173) % 2147483647)
+    if run_params is None:
+        run_params = initialize_run_parameters(run_id, Ra, nx, ny)
 
     # --- Temperature ---
     base_linear = 1.0 - y_norm  # hot bottom, cold top
-    n_cells = np.random.randint(2, 5)
-    phase = 0.6 * t + 0.4 * run_id
-    amp = 0.35 + 0.05 * np.random.randn()
+    T = base_linear.copy()
 
-    convective = amp * np.sin(np.pi * y_norm) * np.cos(n_cells * np.pi * x_norm + phase)
-    secondary = 0.25 * amp * np.sin(2 * np.pi * y_norm) * np.cos((n_cells - 1) * np.pi * x_norm - 0.5 * phase)
-    tertiary = 0.1 * amp * np.sin(3 * np.pi * y_norm) * np.cos((n_cells + 1) * np.pi * x_norm + 0.3 * phase)
+    for mode in run_params['temp_modes']:
+        phase = mode['phase0'] + mode['omega'] * t
+        T += mode['amp'] * np.sin(mode['ay'] * np.pi * y_norm) * \
+             np.cos(mode['ax'] * np.pi * x_norm + phase)
 
-    T = base_linear + convective + secondary + tertiary
-    T += 0.02 * np.sin(6 * np.pi * x_norm + 1.2 * phase) * np.sin(2 * np.pi * y_norm)
-    T += 0.01 * np.random.randn(*T.shape)  # gentle noise
+    # Gentle harmonic to break symmetry
+    aux_phase = run_params['base_phase'] + 0.6 * t
+    T += 0.05 * np.sin(2 * np.pi * y_norm) * np.cos((run_params['base_cells'] + 1) * np.pi * x_norm + aux_phase)
+    T += run_params['noise_amp'] * np.sin(6 * np.pi * x_norm + 1.5 * aux_phase) * np.sin(3 * np.pi * y_norm)
 
     # Enforce boundary temperatures
     T[0, :] = 1.0
     T[-1, :] = 0.0
 
     # --- Stream function & velocities ---
-    psi_amp = 0.18 + 0.04 * np.sin(0.5 * t + run_id)
-    psi_terms = [
-        (psi_amp, 1, n_cells, phase),
-        (0.6 * psi_amp, 2, n_cells - 1, -0.5 * phase),
-        (0.4 * psi_amp, 3, n_cells + 1, 0.35 * phase)
-    ]
-
     psi = np.zeros_like(X)
     u = np.zeros_like(X)
     v = np.zeros_like(X)
 
-    for amp_i, ay, ax, phi in psi_terms:
-        if ax <= 0:
-            continue
+    for mode in run_params['psi_modes']:
+        ax = max(1, mode['ax'])
+        ay = mode['ay']
+        phase = mode['phase0'] + mode['omega'] * t
+        amp_i = mode['amp']
         sin_y = np.sin(ay * np.pi * y_norm)
         cos_y = np.cos(ay * np.pi * y_norm)
-        sin_x = np.sin(ax * np.pi * x_norm + phi)
-        cos_x = np.cos(ax * np.pi * x_norm + phi)
+        sin_x = np.sin(ax * np.pi * x_norm + phase)
+        cos_x = np.cos(ax * np.pi * x_norm + phase)
 
         psi += amp_i * sin_y * sin_x
         u += -amp_i * (ay * np.pi / Ly) * cos_y * sin_x
         v += amp_i * (ax * np.pi / Lx) * sin_y * cos_x
 
     # Add small-scale swirling perturbation for diversity
-    swirl = 0.02 * np.sin(5 * np.pi * x_norm + phase) * np.sin(3 * np.pi * y_norm - 0.4 * phase)
-    u += swirl
-    v += 0.5 * swirl
+    swirl = run_params['swirl']
+    swirl_phase = swirl['phase0'] + swirl['omega'] * t
+    swirl_field = swirl['amp'] * np.sin(swirl['ax'] * np.pi * x_norm + swirl_phase) * \
+        np.sin(swirl['ay'] * np.pi * y_norm - 0.4 * swirl_phase)
+    u += swirl_field
+    v += 0.5 * swirl_field
 
     # Enforce boundary conditions
     u[0, :] = u[-1, :] = 0.0
@@ -87,9 +142,12 @@ def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0):
 
     # --- Pressure ---
     base_pressure = 0.5 - 0.12 * (T - T.mean())
-    pressure_rolls = 0.05 * np.cos(n_cells * np.pi * x_norm + phase) * np.cos(np.pi * y_norm)
-    p = base_pressure + pressure_rolls
-    p += 0.01 * np.random.randn(*p.shape)
+    p = base_pressure
+    for mode in run_params['pressure_modes']:
+        ax = max(1, mode['ax'])
+        ay = mode['ay']
+        phase = mode['phase0'] + mode['omega'] * t
+        p += mode['amp'] * np.cos(ax * np.pi * x_norm + phase) * np.cos(ay * np.pi * y_norm)
 
     return T, u, v, p
 
@@ -107,17 +165,21 @@ def generate_training_dataset(Ra=1e5, n_runs=5, n_samples=50, nx=256, ny=256, sa
 
     all_data = []
 
+    run_params_list = [initialize_run_parameters(run, Ra, nx, ny) for run in range(n_runs)]
+
     for run in range(n_runs):
         print(f"  🏃 Run {run+1}/{n_runs}")
 
         run_data = []
         t_offset = run * n_samples * dt  # Different initial time for each run
+        params = run_params_list[run]
 
         for sample in range(n_samples):
             t = t_offset + sample * dt
 
             # Generate snapshot with run-specific diversity
-            T, u, v, p = generate_stable_rb_data(Ra=Ra, nx=nx, ny=ny, t=t, dt=dt, run_id=run)
+            T, u, v, p = generate_stable_rb_data(Ra=Ra, nx=nx, ny=ny, t=t, dt=dt,
+                                                 run_id=run, run_params=params)
 
             # Save data
             frame_data = {
