@@ -11,6 +11,11 @@ import os
 import matplotlib.pyplot as plt
 import argparse
 
+try:
+    from sourcecodeCDAnet.sim import RBNumericalSimulation
+except ImportError:
+    RBNumericalSimulation = None
+
 
 def initialize_run_parameters(run_id: int, Ra: float, nx: int, ny: int) -> dict:
     """Create smooth, time-coherent parameters for one RB run."""
@@ -19,50 +24,39 @@ def initialize_run_parameters(run_id: int, Ra: float, nx: int, ny: int) -> dict:
     n_base_cells = rng.randint(2, 5)
     base_phase = rng.uniform(0, 2 * np.pi)
 
-    # Temperature convection modes
     temp_modes = []
-    for k in range(3):
-        ax = max(1, n_base_cells + rng.randint(-1, 2))
-        ay = k + 1
-        amp = 0.28 / ay * (1 + 0.1 * rng.randn())
-        phase0 = base_phase + rng.uniform(-np.pi, np.pi)
-        omega = 0.15 * (k + 1) * (1 + 0.1 * rng.randn())
-        temp_modes.append(dict(ax=ax, ay=ay, amp=amp, phase0=phase0, omega=omega))
-
-    # Stream function modes (used for velocities)
     psi_modes = []
-    for k in range(2):
-        ax = max(1, n_base_cells + rng.randint(-1, 2))
-        ay = k + 1
-        amp = 0.2 / ay * (1 + 0.1 * rng.randn())
-        phase0 = base_phase + rng.uniform(-np.pi, np.pi)
-        omega = 0.12 * (k + 1) * (1 + 0.1 * rng.randn())
-        psi_modes.append(dict(ax=ax, ay=ay, amp=amp, phase0=phase0, omega=omega))
-
-    swirl = dict(
-        amp=0.03 * (1 + 0.1 * rng.randn()),
-        ax=n_base_cells + 1,
-        ay=2,
-        phase0=rng.uniform(0, 2 * np.pi),
-        omega=0.3 * (1 + 0.1 * rng.randn())
-    )
+    for k in range(1, n_base_cells + 1):
+        temp_modes.append(dict(
+            ax=k,
+            amp=0.25 * (1 + 0.05 * rng.randn()) / k,
+            phase0=rng.uniform(-np.pi / 4, np.pi / 4),
+            omega=0.08 * (1 + 0.1 * rng.randn())
+        ))
+        psi_modes.append(dict(
+            ax=k,
+            amp=0.18 * (1 + 0.05 * rng.randn()) / k,
+            phase0=rng.uniform(-np.pi / 6, np.pi / 6),
+            omega=0.07 * (1 + 0.1 * rng.randn())
+        ))
 
     pressure_modes = []
-    for k in range(2):
+    for k in range(1, min(3, n_base_cells + 1)):
         pressure_modes.append(dict(
-            ax=max(1, n_base_cells + k),
-            ay=k + 1,
-            amp=0.06 / (k + 1),
-            phase0=rng.uniform(0, 2 * np.pi),
-            omega=0.18 * (1 + 0.1 * rng.randn())
+            ax=k,
+            amp=0.05 / k,
+            phase0=rng.uniform(-np.pi / 3, np.pi / 3),
+            omega=0.1 * (1 + 0.05 * rng.randn())
         ))
+
+    # weak noise for slight asymmetry
+    noise_amp = 0.005 * (1 + 0.05 * rng.randn())
 
     return dict(
         temp_modes=temp_modes,
         psi_modes=psi_modes,
-        swirl=swirl,
         pressure_modes=pressure_modes,
-        noise_amp=0.01,
+        noise_amp=noise_amp,
         base_cells=n_base_cells,
         base_phase=base_phase
     )
@@ -95,13 +89,12 @@ def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0,
 
     for mode in run_params['temp_modes']:
         phase = mode['phase0'] + mode['omega'] * t
-        T += mode['amp'] * np.sin(mode['ay'] * np.pi * y_norm) * \
-             np.cos(mode['ax'] * np.pi * x_norm + phase)
+        T += mode['amp'] * np.sin(np.pi * y_norm) * np.cos(mode['ax'] * np.pi * x_norm + phase)
 
-    # Gentle harmonic to break symmetry
-    aux_phase = run_params['base_phase'] + 0.6 * t
-    T += 0.05 * np.sin(2 * np.pi * y_norm) * np.cos((run_params['base_cells'] + 1) * np.pi * x_norm + aux_phase)
-    T += run_params['noise_amp'] * np.sin(6 * np.pi * x_norm + 1.5 * aux_phase) * np.sin(3 * np.pi * y_norm)
+    # boundary-layer enrichment for mushroom-shaped plumes
+    aux_phase = run_params['base_phase'] + 0.4 * t
+    T += 0.1 * np.sin(2 * np.pi * y_norm) * np.cos(run_params['base_cells'] * np.pi * x_norm + aux_phase)
+    T += run_params['noise_amp'] * np.sin(4 * np.pi * x_norm + 0.7 * aux_phase) * np.sin(3 * np.pi * y_norm)
 
     # Enforce boundary temperatures
     T[0, :] = 1.0
@@ -114,25 +107,16 @@ def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0,
 
     for mode in run_params['psi_modes']:
         ax = max(1, mode['ax'])
-        ay = mode['ay']
         phase = mode['phase0'] + mode['omega'] * t
         amp_i = mode['amp']
-        sin_y = np.sin(ay * np.pi * y_norm)
-        cos_y = np.cos(ay * np.pi * y_norm)
+        sin_y = np.sin(np.pi * y_norm)
+        cos_y = np.cos(np.pi * y_norm)
         sin_x = np.sin(ax * np.pi * x_norm + phase)
         cos_x = np.cos(ax * np.pi * x_norm + phase)
 
         psi += amp_i * sin_y * sin_x
-        u += -amp_i * (ay * np.pi / Ly) * cos_y * sin_x
+        u += -amp_i * (np.pi / Ly) * cos_y * sin_x
         v += amp_i * (ax * np.pi / Lx) * sin_y * cos_x
-
-    # Add small-scale swirling perturbation for diversity
-    swirl = run_params['swirl']
-    swirl_phase = swirl['phase0'] + swirl['omega'] * t
-    swirl_field = swirl['amp'] * np.sin(swirl['ax'] * np.pi * x_norm + swirl_phase) * \
-        np.sin(swirl['ay'] * np.pi * y_norm - 0.4 * swirl_phase)
-    u += swirl_field
-    v += 0.5 * swirl_field
 
     # Enforce boundary conditions
     u[0, :] = u[-1, :] = 0.0
@@ -141,7 +125,7 @@ def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0,
     v[:, 0] = v[:, -1]
 
     # --- Pressure ---
-    base_pressure = 0.5 - 0.12 * (T - T.mean())
+    base_pressure = 0.5 - 0.1 * (T - T.mean())
     p = base_pressure
     for mode in run_params['pressure_modes']:
         ax = max(1, mode['ax'])
@@ -152,8 +136,9 @@ def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0,
     return T, u, v, p
 
 
-def generate_training_dataset(Ra=1e5, n_runs=5, n_samples=50, nx=256, ny=256, save_path='rb_data_numerical', dt=0.05):
-    """Generate training dataset with stable time evolution"""
+def generate_training_dataset_synthetic(Ra=1e5, n_runs=5, n_samples=50, nx=256, ny=256,
+                                        save_path='rb_data_numerical', dt=0.05):
+    """Generate dataset using the analytic synthetic generator (legacy)."""
     os.makedirs(save_path, exist_ok=True)
 
     print(f"🌡️ Stable RB Data Generation")
@@ -219,11 +204,80 @@ def generate_training_dataset(Ra=1e5, n_runs=5, n_samples=50, nx=256, ny=256, sa
 
     # Create consolidated dataset
     create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=dt)
-
     return all_data
 
 
-def create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=0.05):
+def generate_paper_style_dataset(Ra=1e5, n_runs=5, nx=192, ny=64, save_path='rb_data_numerical',
+                                dt=1e-3, t_start=5.0, t_end=15.0, sample_dt=0.1, pr=0.7):
+    """Generate RB data via numerical integrator mimicking Hammoud et al. (2022)."""
+    if RBNumericalSimulation is None:
+        raise ImportError("RBNumericalSimulation not available. Ensure sourcecodeCDAnet is accessible.")
+
+    os.makedirs(save_path, exist_ok=True)
+
+    print("📐 Numerical RB Data Generation (paper-style)")
+    print(f"  Ra = {Ra:.0e}, nx = {nx}, ny = {ny}")
+    print(f"  dt = {dt}, warm-up until t = {t_start}, final time = {t_end}, sample_dt = {sample_dt}")
+
+    total_samples = int(np.floor((t_end - t_start) / sample_dt))
+    if total_samples <= 0:
+        raise ValueError("Invalid sampling configuration: no samples to collect.")
+
+    all_data = []
+    warmup_steps = int(round(t_start / dt))
+    stride = int(round(sample_dt / dt))
+    if abs(stride * dt - sample_dt) > 1e-8:
+        raise ValueError("sample_dt must be a multiple of dt for the integrator.")
+
+    for run in range(n_runs):
+        print(f"  🏃 Numerical run {run+1}/{n_runs}")
+        np.random.seed(run)
+        sim = RBNumericalSimulation(nx=nx, ny=ny, Lx=3.0, Ly=1.0, Ra=Ra, Pr=pr, dt=dt, save_path=save_path)
+
+        for step in range(warmup_steps):
+            sim.step(step)
+
+        run_frames = []
+        current_time = t_start
+        for idx in range(total_samples):
+            for local in range(stride):
+                sim.step(idx * stride + local)
+                current_time += dt
+            run_frames.append({
+                'temperature': sim.T.copy(),
+                'velocity_x': sim.u.copy(),
+                'velocity_y': sim.v.copy(),
+                'pressure': sim.p.copy(),
+                'time': current_time
+            })
+
+            if (idx + 1) % 10 == 0 or idx == total_samples - 1:
+                print(f"      Saved frame {idx+1}/{total_samples} at t = {current_time:.2f}")
+
+        filename = f'{save_path}/rb_data_Ra_{Ra:.0e}_run_{run:02d}.h5'
+        with h5py.File(filename, 'w') as f:
+            f.attrs['Ra'] = Ra
+            f.attrs['Pr'] = pr
+            f.attrs['nx'] = nx
+            f.attrs['ny'] = ny
+            f.attrs['n_samples'] = total_samples
+            f.attrs['run_id'] = run
+            f.attrs['dt'] = dt
+            for i, frame in enumerate(run_frames):
+                grp = f.create_group(f'frame_{i:03d}')
+                for key, value in frame.items():
+                    if key != 'time':
+                        grp.create_dataset(key, data=value)
+                    else:
+                        grp.attrs['time'] = value
+        print(f"    ✅ Saved numerical run: {filename}")
+        all_data.append(run_frames)
+
+    create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=dt, pr=pr)
+    return all_data
+
+
+def create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=0.05, pr=0.7):
     """Create consolidated dataset compatible with training"""
     n_runs = len(all_data)
     n_samples = len(all_data[0])
@@ -254,7 +308,7 @@ def create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=0.05):
 
         # Add metadata compatible with training script
         f.attrs['Ra'] = Ra
-        f.attrs['Pr'] = 0.7
+        f.attrs['Pr'] = pr
         f.attrs['nx'] = nx
         f.attrs['ny'] = ny
         f.attrs['Lx'] = 3.0
@@ -345,18 +399,20 @@ def visualize_data(output_file):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate stable Rayleigh-Bénard data')
+    parser = argparse.ArgumentParser(description='Generate Rayleigh-Bénard datasets')
     parser.add_argument('--Ra', type=float, default=1e5, help='Rayleigh number')
-    parser.add_argument('--n_runs', type=int, default=25,
-                        help='Number of independent runs (default matches CDAnet paper: 20 train + 5 val)')
-    parser.add_argument('--n_samples', type=int, default=200,
-                        help='Snapshots per run (default spans t∈[25,45] with Δt=0.1, as in CDAnet paper)')
-    parser.add_argument('--nx', type=int, default=256, help='Grid points in x (high resolution)')
-    parser.add_argument('--ny', type=int, default=256, help='Grid points in y (high resolution)')
-    parser.add_argument('--dt', type=float, default=0.1,
-                        help='Time step between saved samples (0.1 matches paper sampling)')
+    parser.add_argument('--n_runs', type=int, default=5, help='Number of runs')
+    parser.add_argument('--n_samples', type=int, default=200, help='Snapshots per run (synthetic mode)')
+    parser.add_argument('--nx', type=int, default=192, help='Grid points in x')
+    parser.add_argument('--ny', type=int, default=64, help='Grid points in y')
+    parser.add_argument('--dt', type=float, default=1e-3, help='Integrator time step (numerical mode)')
+    parser.add_argument('--t_start', type=float, default=5.0, help='Warm-up time before sampling (numerical mode)')
+    parser.add_argument('--t_end', type=float, default=15.0, help='Final snapshot time (numerical mode)')
+    parser.add_argument('--sample_dt', type=float, default=0.1, help='Interval between saved frames (numerical mode)')
     parser.add_argument('--save_path', type=str, default='rb_data_numerical', help='Save directory')
     parser.add_argument('--visualize', action='store_true', help='Create visualizations')
+    parser.add_argument('--mode', type=str, default='paper', choices=['paper', 'synthetic'],
+                        help='Generation mode: "paper" uses numerical solver, "synthetic" uses analytic approximation')
 
     args = parser.parse_args()
 
@@ -367,18 +423,28 @@ def main():
         shutil.rmtree(args.save_path)
 
     # Generate stable data
-    print("🚀 Starting STABLE Rayleigh-Bénard data generation...")
-    print("Uses analytical patterns with proper time evolution - fast and stable!")
-
-    all_data = generate_training_dataset(
-        Ra=args.Ra,
-        n_runs=args.n_runs,
-        n_samples=args.n_samples,
-        nx=args.nx,
-        ny=args.ny,
-        save_path=args.save_path,
-        dt=args.dt
-    )
+    if args.mode == 'paper':
+        all_data = generate_paper_style_dataset(
+            Ra=args.Ra,
+            n_runs=args.n_runs,
+            nx=args.nx,
+            ny=args.ny,
+            save_path=args.save_path,
+            dt=args.dt,
+            t_start=args.t_start,
+            t_end=args.t_end,
+            sample_dt=args.sample_dt
+        )
+    else:
+        all_data = generate_training_dataset_synthetic(
+            Ra=args.Ra,
+            n_runs=args.n_runs,
+            n_samples=args.n_samples,
+            nx=args.nx,
+            ny=args.ny,
+            save_path=args.save_path,
+            dt=args.sample_dt
+        )
 
     print(f"\n✅ Stable data generation complete!")
     print(f"📁 Data saved in: {args.save_path}/")

@@ -38,15 +38,15 @@ During training, `train_cdanet.py` samples 3D crops, evaluates the implicit deco
 - Output file: `rb2d_ra<Ra>_consolidated.h5` containing channels `[p, b, u, w]` with metadata (`Ra`, `Pr`, `dt`, etc.).
 - Optional `--visualize` flag writes a multi-panel overview of the generated dataset.
 
-Quick dataset generation:
+Quick dataset generation (paper-style numerical solver):
 
 ```bash
 python3 generate_rb_data.py \
     --Ra 1e5 \
-    --n_runs 25 \
-    --n_samples 200 \
-    --dt 0.1 \
     --save_path rb_data_numerical \
+    --mode paper \
+    --nx 192 --ny 64 \
+    --t_start 5.0 --t_end 15.0 --sample_dt 0.1 \
     --visualize
 ```
 
