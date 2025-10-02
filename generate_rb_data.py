@@ -1,460 +1,275 @@
 #!/usr/bin/env python3
-"""
-Simple but stable Rayleigh-Bénard data generator
-Uses analytical patterns with physics-informed time evolution
-Avoids numerical instabilities while providing realistic training data
-"""
+"""Numerical Rayleigh–Bénard data generator (based on sourcecodeCDAnet/sim.py)."""
 
-import numpy as np
-import h5py
-import os
-import matplotlib.pyplot as plt
 import argparse
+import os
 
-try:
-    from sourcecodeCDAnet.sim import RBNumericalSimulation
-except ImportError:
-    RBNumericalSimulation = None
-
-
-def initialize_run_parameters(run_id: int, Ra: float, nx: int, ny: int) -> dict:
-    """Create smooth, time-coherent parameters for one RB run."""
-    rng = np.random.RandomState(run_id)
-
-    n_base_cells = rng.randint(2, 5)
-    base_phase = rng.uniform(0, 2 * np.pi)
-
-    temp_modes = []
-    psi_modes = []
-    for k in range(1, n_base_cells + 1):
-        temp_modes.append(dict(
-            ax=k,
-            amp=0.25 * (1 + 0.05 * rng.randn()) / k,
-            phase0=rng.uniform(-np.pi / 4, np.pi / 4),
-            omega=0.08 * (1 + 0.1 * rng.randn())
-        ))
-        psi_modes.append(dict(
-            ax=k,
-            amp=0.18 * (1 + 0.05 * rng.randn()) / k,
-            phase0=rng.uniform(-np.pi / 6, np.pi / 6),
-            omega=0.07 * (1 + 0.1 * rng.randn())
-        ))
-
-    pressure_modes = []
-    for k in range(1, min(3, n_base_cells + 1)):
-        pressure_modes.append(dict(
-            ax=k,
-            amp=0.05 / k,
-            phase0=rng.uniform(-np.pi / 3, np.pi / 3),
-            omega=0.1 * (1 + 0.05 * rng.randn())
-        ))
-
-    # weak noise for slight asymmetry
-    noise_amp = 0.005 * (1 + 0.05 * rng.randn())
-
-    return dict(
-        temp_modes=temp_modes,
-        psi_modes=psi_modes,
-        pressure_modes=pressure_modes,
-        noise_amp=noise_amp,
-        base_cells=n_base_cells,
-        base_phase=base_phase
-    )
+import h5py
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.fft import fft2, ifft2
 
 
-def generate_stable_rb_data(Ra=1e5, nx=256, ny=256, t=0.0, dt=0.05, run_id=0,
-                            run_params=None):
-    """Generate analytical Rayleigh–Bénard-like roll patterns.
+class RBNumericalSimulation:
+    def __init__(self, nx=128, ny=64, Lx=3.0, Ly=1.0, Ra=1e5, Pr=0.7,
+                 dt=5e-4, save_path='rb_data_numerical'):
+        self.nx = nx
+        self.ny = ny
+        self.Lx = Lx
+        self.Ly = Ly
+        self.Ra = Ra
+        self.Pr = Pr
+        self.dt = dt
+        self.save_path = save_path
 
-    The construction aims to mimic classic RB convection cells:
-        * Temperature has a vertical gradient plus convective rolls.
-        * Stream function is composed of a few sinusoidal rolls, from which
-          velocities are derived analytically.
-        * Mild stochasticity is injected through phase shifts and secondary modes
-          to diversify the dataset.
-    """
+        self.dx = Lx / nx
+        self.dy = Ly / ny
 
-    Lx, Ly = 3.0, 1.0
-    x = np.linspace(0, Lx, nx)
-    y = np.linspace(0, Ly, ny)
-    X, Y = np.meshgrid(x, y)
-    x_norm = X / Lx
-    y_norm = Y / Ly
-    if run_params is None:
-        run_params = initialize_run_parameters(run_id, Ra, nx, ny)
+        self.T = np.zeros((ny, nx))
+        self.u = np.zeros((ny, nx))
+        self.v = np.zeros((ny, nx))
+        self.p = np.zeros((ny, nx))
 
-    # --- Temperature ---
-    base_linear = 1.0 - y_norm  # hot bottom, cold top
-    T = base_linear.copy()
+        self.T_prev = [np.zeros((ny, nx)) for _ in range(2)]
+        self.u_prev = [np.zeros((ny, nx)) for _ in range(2)]
+        self.v_prev = [np.zeros((ny, nx)) for _ in range(2)]
 
-    for mode in run_params['temp_modes']:
-        phase = mode['phase0'] + mode['omega'] * t
-        T += mode['amp'] * np.sin(np.pi * y_norm) * np.cos(mode['ax'] * np.pi * x_norm + phase)
+        self.setup_initial_conditions()
+        os.makedirs(self.save_path, exist_ok=True)
 
-    # boundary-layer enrichment for mushroom-shaped plumes
-    aux_phase = run_params['base_phase'] + 0.4 * t
-    T += 0.1 * np.sin(2 * np.pi * y_norm) * np.cos(run_params['base_cells'] * np.pi * x_norm + aux_phase)
-    T += run_params['noise_amp'] * np.sin(4 * np.pi * x_norm + 0.7 * aux_phase) * np.sin(3 * np.pi * y_norm)
+    def setup_initial_conditions(self):
+        self.T[-1, :] = 1.0
+        self.T[0, :] = 0.0
+        self.T += 1e-3 * np.random.randn(self.ny, self.nx)
 
-    # Enforce boundary temperatures
-    T[0, :] = 1.0
-    T[-1, :] = 0.0
+        for i in range(2):
+            self.T_prev[i] = self.T.copy()
+            self.u_prev[i] = self.u.copy()
+            self.v_prev[i] = self.v.copy()
 
-    # --- Stream function & velocities ---
-    psi = np.zeros_like(X)
-    u = np.zeros_like(X)
-    v = np.zeros_like(X)
+    def solve_pressure_poisson(self):
+        source = (
+            (np.roll(self.u, -1, axis=1) - np.roll(self.u, 1, axis=1)) / (2 * self.dx)
+            + (np.roll(self.v, -1, axis=0) - np.roll(self.v, 1, axis=0)) / (2 * self.dy)
+        ) / self.dt
 
-    for mode in run_params['psi_modes']:
-        ax = max(1, mode['ax'])
-        phase = mode['phase0'] + mode['omega'] * t
-        amp_i = mode['amp']
-        sin_y = np.sin(np.pi * y_norm)
-        cos_y = np.cos(np.pi * y_norm)
-        sin_x = np.sin(ax * np.pi * x_norm + phase)
-        cos_x = np.cos(ax * np.pi * x_norm + phase)
+        source_fft = fft2(source)
+        kx = 2 * np.pi * np.fft.fftfreq(self.nx, self.dx)
+        ky = 2 * np.pi * np.fft.fftfreq(self.ny, self.dy)
+        Kx, Ky = np.meshgrid(kx, ky)
+        K2 = Kx * Kx + Ky * Ky
+        K2[0, 0] = 1.0
 
-        psi += amp_i * sin_y * sin_x
-        u += -amp_i * (np.pi / Ly) * cos_y * sin_x
-        v += amp_i * (ax * np.pi / Lx) * sin_y * cos_x
+        p_fft = source_fft / (-K2)
+        self.p = np.real(ifft2(p_fft))
 
-    # Enforce boundary conditions
-    u[0, :] = u[-1, :] = 0.0
-    v[0, :] = v[-1, :] = 0.0
-    u[:, 0] = u[:, -1]
-    v[:, 0] = v[:, -1]
+    def adams_bashforth_step(self, f, f_prev1, f_prev2):
+        return f + self.dt * (23 / 12 * f_prev1 - 16 / 12 * f_prev2 + 5 / 12 * f)
 
-    # --- Pressure ---
-    base_pressure = 0.5 - 0.1 * (T - T.mean())
-    p = base_pressure
-    for mode in run_params['pressure_modes']:
-        ax = max(1, mode['ax'])
-        ay = mode['ay']
-        phase = mode['phase0'] + mode['omega'] * t
-        p += mode['amp'] * np.cos(ax * np.pi * x_norm + phase) * np.cos(ay * np.pi * y_norm)
+    def step(self, step_number):
+        self.T_prev[1] = self.T_prev[0].copy()
+        self.T_prev[0] = self.T.copy()
+        self.u_prev[1] = self.u_prev[0].copy()
+        self.u_prev[0] = self.u.copy()
+        self.v_prev[1] = self.v_prev[0].copy()
+        self.v_prev[0] = self.v.copy()
 
-    return T, u, v, p
+        self.solve_pressure_poisson()
+
+        self.u = self.adams_bashforth_step(
+            -(np.roll(self.p, -1, axis=1) - np.roll(self.p, 1, axis=1)) / (2 * self.dx),
+            self.u_prev[0],
+            self.u_prev[1],
+        )
+
+        self.v = self.adams_bashforth_step(
+            -(np.roll(self.p, -1, axis=0) - np.roll(self.p, 1, axis=0)) / (2 * self.dy)
+            + self.Ra * self.Pr * self.T,
+            self.v_prev[0],
+            self.v_prev[1],
+        )
+
+        T_update = self.adams_bashforth_step(
+            self.Pr
+            * (
+                (np.roll(self.T, -1, axis=1) - 2 * self.T + np.roll(self.T, 1, axis=1))
+                / (self.dx * self.dx)
+                + (np.roll(self.T, -1, axis=0) - 2 * self.T + np.roll(self.T, 1, axis=0))
+                / (self.dy * self.dy)
+            )
+            - (
+                self.u * (np.roll(self.T, -1, axis=1) - np.roll(self.T, 1, axis=1)) / (2 * self.dx)
+                + self.v * (np.roll(self.T, -1, axis=0) - np.roll(self.T, 1, axis=0)) / (2 * self.dy)
+            ),
+            self.T_prev[0],
+            self.T_prev[1],
+        )
+
+        self.T = np.clip(T_update, 0, 1)
+        self.T[0, :] = 0.0
+        self.T[-1, :] = 1.0
+
+        self.u[:, 0] = self.u[:, -1]
+        self.u[:, -1] = self.u[:, 0]
+        self.v[:, 0] = self.v[:, -1]
+        self.v[:, -1] = self.v[:, 0]
+
+    def plot_temperature(self, step_number):
+        plt.imshow(self.T, cmap='hot', origin='lower', extent=[0, self.Lx, 0, self.Ly])
+        plt.colorbar(label='Temperature')
+        plt.title('Temperature Field')
+        plt.xlabel('x')
+        plt.ylabel('y')
+        plt.savefig(f"{self.save_path}/temperature_step_{step_number}.png")
+        plt.clf()
 
 
-def generate_training_dataset_synthetic(Ra=1e5, n_runs=5, n_samples=50, nx=256, ny=256,
-                                        save_path='rb_data_numerical', dt=0.05):
-    """Generate dataset using the analytic synthetic generator (legacy)."""
+def generate_training_dataset(Ra=1e5, n_runs=25, save_path='rb_data_numerical',
+                              nx=128, ny=64, dt=5e-4, t_start=25.0,
+                              t_end=45.0, sample_dt=0.1, Pr=0.7, visualize=False):
     os.makedirs(save_path, exist_ok=True)
-
-    print(f"🌡️ Stable RB Data Generation")
-    print(f"  Rayleigh number: Ra = {Ra:.0e}")
-    print(f"  Runs: {n_runs}")
-    print(f"  Samples per run: {n_samples}")
-    print(f"  Grid: {nx}×{ny}")
-    print()
-
-    all_data = []
-
-    run_params_list = [initialize_run_parameters(run, Ra, nx, ny) for run in range(n_runs)]
-
-    for run in range(n_runs):
-        print(f"  🏃 Run {run+1}/{n_runs}")
-
-        run_data = []
-        t_offset = run * n_samples * dt  # Different initial time for each run
-        params = run_params_list[run]
-
-        for sample in range(n_samples):
-            t = t_offset + sample * dt
-
-            # Generate snapshot with run-specific diversity
-            T, u, v, p = generate_stable_rb_data(Ra=Ra, nx=nx, ny=ny, t=t, dt=dt,
-                                                 run_id=run, run_params=params)
-
-            # Save data
-            frame_data = {
-                'temperature': T.copy(),
-                'velocity_x': u.copy(),
-                'velocity_y': v.copy(),
-                'pressure': p.copy(),
-                'time': t
-            }
-            run_data.append(frame_data)
-
-            if sample % 10 == 0:
-                print(f"      Sample {sample+1}/{n_samples}")
-
-        # Save individual run
-        filename = f'{save_path}/rb_data_Ra_{Ra:.0e}_run_{run:02d}.h5'
-        with h5py.File(filename, 'w') as f:
-            # Add run-level attributes for training compatibility
-            f.attrs['Ra'] = Ra
-            f.attrs['Pr'] = 0.7
-            f.attrs['nx'] = nx
-            f.attrs['ny'] = ny
-            f.attrs['n_samples'] = n_samples
-            f.attrs['run_id'] = run
-            f.attrs['dt'] = dt
-
-            for i, frame in enumerate(run_data):
-                grp = f.create_group(f'frame_{i:03d}')
-                for key, value in frame.items():
-                    if key != 'time':
-                        grp.create_dataset(key, data=value)
-                    else:
-                        grp.attrs['time'] = value
-
-        print(f"    ✅ Saved: {filename}")
-        all_data.append(run_data)
-
-    # Create consolidated dataset
-    create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=dt)
-    return all_data
-
-
-def generate_paper_style_dataset(Ra=1e5, n_runs=5, nx=192, ny=64, save_path='rb_data_numerical',
-                                dt=1e-3, t_start=5.0, t_end=15.0, sample_dt=0.1, pr=0.7):
-    """Generate RB data via numerical integrator mimicking Hammoud et al. (2022)."""
-    if RBNumericalSimulation is None:
-        raise ImportError("RBNumericalSimulation not available. Ensure sourcecodeCDAnet is accessible.")
-
-    os.makedirs(save_path, exist_ok=True)
-
-    print("📐 Numerical RB Data Generation (paper-style)")
-    print(f"  Ra = {Ra:.0e}, nx = {nx}, ny = {ny}")
-    print(f"  dt = {dt}, warm-up until t = {t_start}, final time = {t_end}, sample_dt = {sample_dt}")
 
     total_samples = int(np.floor((t_end - t_start) / sample_dt))
     if total_samples <= 0:
-        raise ValueError("Invalid sampling configuration: no samples to collect.")
+        raise ValueError('No samples to collect; adjust time window.')
 
-    all_data = []
     warmup_steps = int(round(t_start / dt))
     stride = int(round(sample_dt / dt))
     if abs(stride * dt - sample_dt) > 1e-8:
-        raise ValueError("sample_dt must be a multiple of dt for the integrator.")
+        raise ValueError('sample_dt must be an integer multiple of dt')
+
+    all_runs = []
 
     for run in range(n_runs):
         print(f"  🏃 Numerical run {run+1}/{n_runs}")
-        np.random.seed(run)
-        sim = RBNumericalSimulation(nx=nx, ny=ny, Lx=3.0, Ly=1.0, Ra=Ra, Pr=pr, dt=dt, save_path=save_path)
+        sim = RBNumericalSimulation(nx=nx, ny=ny, Lx=3.0, Ly=1.0,
+                                    Ra=Ra, Pr=Pr, dt=dt, save_path=save_path)
 
         for step in range(warmup_steps):
             sim.step(step)
 
-        run_frames = []
+        frames = []
         current_time = t_start
         for idx in range(total_samples):
             for local in range(stride):
                 sim.step(idx * stride + local)
                 current_time += dt
-            run_frames.append({
+            frames.append({
                 'temperature': sim.T.copy(),
                 'velocity_x': sim.u.copy(),
                 'velocity_y': sim.v.copy(),
                 'pressure': sim.p.copy(),
                 'time': current_time
             })
-
             if (idx + 1) % 10 == 0 or idx == total_samples - 1:
-                print(f"      Saved frame {idx+1}/{total_samples} at t = {current_time:.2f}")
+                print(f"      Frame {idx+1}/{total_samples} at t={current_time:.2f}")
 
         filename = f'{save_path}/rb_data_Ra_{Ra:.0e}_run_{run:02d}.h5'
         with h5py.File(filename, 'w') as f:
             f.attrs['Ra'] = Ra
-            f.attrs['Pr'] = pr
+            f.attrs['Pr'] = Pr
             f.attrs['nx'] = nx
             f.attrs['ny'] = ny
             f.attrs['n_samples'] = total_samples
             f.attrs['run_id'] = run
             f.attrs['dt'] = dt
-            for i, frame in enumerate(run_frames):
+            for i, frame in enumerate(frames):
                 grp = f.create_group(f'frame_{i:03d}')
                 for key, value in frame.items():
-                    if key != 'time':
-                        grp.create_dataset(key, data=value)
-                    else:
+                    if key == 'time':
                         grp.attrs['time'] = value
-        print(f"    ✅ Saved numerical run: {filename}")
-        all_data.append(run_frames)
+                    else:
+                        grp.create_dataset(key, data=value)
+        print(f"    ✅ Saved: {filename}")
+        all_runs.append(frames)
 
-    create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=dt, pr=pr)
-    return all_data
+    create_consolidated_dataset(save_path, Ra, all_runs, nx, ny, dt=dt, pr=Pr)
+
+    if visualize:
+        viz_file = os.path.join(save_path, f'rb_snapshot_ra{Ra:.0e}.png')
+        plot_snapshot(all_runs[0][0], viz_file)
+        print(f"✅ Visualization saved: {viz_file}")
+
+    return all_runs
 
 
-def create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=0.05, pr=0.7):
-    """Create consolidated dataset compatible with training"""
+def create_consolidated_dataset(save_path, Ra, all_data, nx, ny, dt=0.1, pr=0.7):
     n_runs = len(all_data)
-    n_samples = len(all_data[0])
+    n_samples = len(all_data[0]) if all_data else 0
+    output_file = os.path.join(save_path, f'rb2d_ra{Ra:.0e}_consolidated.h5')
+    print(f"📦 Writing consolidated dataset: {output_file}")
 
-    print(f"\n📦 Creating consolidated dataset: {n_runs} runs × {n_samples} samples")
-
-    # Initialize arrays
-    p_data = np.zeros((n_runs, n_samples, ny, nx), dtype=np.float32)
-    b_data = np.zeros((n_runs, n_samples, ny, nx), dtype=np.float32)  # Temperature -> b
-    u_data = np.zeros((n_runs, n_samples, ny, nx), dtype=np.float32)
-    w_data = np.zeros((n_runs, n_samples, ny, nx), dtype=np.float32)  # v -> w
-
-    # Fill arrays
-    for run_idx, run_data in enumerate(all_data):
-        for sample_idx, frame in enumerate(run_data):
-            p_data[run_idx, sample_idx] = frame['pressure']
-            b_data[run_idx, sample_idx] = frame['temperature']
-            u_data[run_idx, sample_idx] = frame['velocity_x']
-            w_data[run_idx, sample_idx] = frame['velocity_y']
-
-    # Save consolidated dataset
-    output_file = f'{save_path}/rb2d_ra{Ra:.0e}_consolidated.h5'
     with h5py.File(output_file, 'w') as f:
-        f.create_dataset('p', data=p_data, compression='gzip')
-        f.create_dataset('b', data=b_data, compression='gzip')
-        f.create_dataset('u', data=u_data, compression='gzip')
-        f.create_dataset('w', data=w_data, compression='gzip')
-
-        # Add metadata compatible with training script
         f.attrs['Ra'] = Ra
         f.attrs['Pr'] = pr
         f.attrs['nx'] = nx
         f.attrs['ny'] = ny
-        f.attrs['Lx'] = 3.0
-        f.attrs['Ly'] = 1.0
         f.attrs['n_runs'] = n_runs
         f.attrs['n_samples'] = n_samples
-        f.attrs['simulation_type'] = 'stable_analytical'
-        f.attrs['format'] = 'consolidated_training_compatible'
         f.attrs['dt'] = dt
 
-    print(f"✅ Consolidated dataset: {output_file}")
+        temp = np.zeros((n_runs, n_samples, ny, nx), dtype=np.float32)
+        u = np.zeros_like(temp)
+        v = np.zeros_like(temp)
+        p = np.zeros_like(temp)
 
-    # Print statistics
-    print(f"\n📊 Data statistics:")
-    print(f"  Temperature range: [{np.min(b_data):.3f}, {np.max(b_data):.3f}]")
-    print(f"  Pressure range: [{np.min(p_data):.3f}, {np.max(p_data):.3f}]")
-    print(f"  U-velocity range: [{np.min(u_data):.3f}, {np.max(u_data):.3f}]")
-    print(f"  V-velocity range: [{np.min(w_data):.3f}, {np.max(w_data):.3f}]")
+        for run_idx, run_frames in enumerate(all_data):
+            for frame_idx, frame in enumerate(run_frames):
+                temp[run_idx, frame_idx] = frame['temperature']
+                u[run_idx, frame_idx] = frame['velocity_x']
+                v[run_idx, frame_idx] = frame['velocity_y']
+                p[run_idx, frame_idx] = frame['pressure']
 
-    # Check temporal evolution
-    temp_change = np.max(np.abs(b_data[0, 0] - b_data[0, -1]))
-    vel_change = np.max(np.abs(u_data[0, 0] - u_data[0, -1]))
-    print(f"  ✅ Temporal evolution - Temperature: {temp_change:.4f}, Velocity: {vel_change:.4f}")
-
-    return output_file
+        f.create_dataset('b', data=temp, compression='gzip')
+        f.create_dataset('u', data=u, compression='gzip')
+        f.create_dataset('w', data=v, compression='gzip')
+        f.create_dataset('p', data=p, compression='gzip')
 
 
-def visualize_data(output_file):
-    """Create visualization of the data"""
-    print(f"\n🎨 Creating visualization: {output_file}")
-
-    with h5py.File(output_file, 'r') as f:
-        b_data = f['b'][:]
-        p_data = f['p'][:]
-        u_data = f['u'][:]
-        w_data = f['w'][:]
-
-        n_runs, n_samples, ny, nx = b_data.shape
-        print(f"  Data shape: {n_runs} runs × {n_samples} samples × {ny}×{nx}")
-
-    # Select time steps for visualization
-    run_idx = 0
-    time_steps = [0, n_samples//4, n_samples//2, 3*n_samples//4, n_samples-1]
-
-    # Create visualization
-    fig, axes = plt.subplots(4, len(time_steps), figsize=(15, 12))
-    fig.suptitle('Stable Rayleigh-Bénard Simulation (Time Evolution)', fontsize=16)
-
-    for i, t in enumerate(time_steps):
-        # Temperature
-        im1 = axes[0, i].imshow(b_data[run_idx, t], cmap='RdBu_r', aspect='equal')
-        axes[0, i].set_title(f'Temperature t={t}')
-        axes[0, i].set_xticks([])
-        axes[0, i].set_yticks([])
-
-        # Pressure
-        im2 = axes[1, i].imshow(p_data[run_idx, t], cmap='viridis', aspect='equal')
-        axes[1, i].set_title(f'Pressure t={t}')
-        axes[1, i].set_xticks([])
-        axes[1, i].set_yticks([])
-
-        # U velocity
-        im3 = axes[2, i].imshow(u_data[run_idx, t], cmap='RdBu', aspect='equal')
-        axes[2, i].set_title(f'U Velocity t={t}')
-        axes[2, i].set_xticks([])
-        axes[2, i].set_yticks([])
-
-        # V velocity
-        im4 = axes[3, i].imshow(w_data[run_idx, t], cmap='RdBu', aspect='equal')
-        axes[3, i].set_title(f'V Velocity t={t}')
-        axes[3, i].set_xticks([])
-        axes[3, i].set_yticks([])
-
-    # Add colorbars
-    plt.colorbar(im1, ax=axes[0, :], shrink=0.6, label='Temperature')
-    plt.colorbar(im2, ax=axes[1, :], shrink=0.6, label='Pressure')
-    plt.colorbar(im3, ax=axes[2, :], shrink=0.6, label='U Velocity')
-    plt.colorbar(im4, ax=axes[3, :], shrink=0.6, label='V Velocity')
-
+def plot_snapshot(frame, output_path):
+    fig, axes = plt.subplots(2, 2, figsize=(10, 6))
+    cm = axes[0, 0].imshow(frame['temperature'], origin='lower', aspect='auto')
+    plt.colorbar(cm, ax=axes[0, 0]); axes[0, 0].set_title('Temperature')
+    axes[0, 1].imshow(frame['pressure'], origin='lower', aspect='auto', cmap='coolwarm')
+    axes[0, 1].set_title('Pressure')
+    axes[1, 0].imshow(frame['velocity_x'], origin='lower', aspect='auto', cmap='coolwarm')
+    axes[1, 0].set_title('Velocity X')
+    axes[1, 1].imshow(frame['velocity_y'], origin='lower', aspect='auto', cmap='coolwarm')
+    axes[1, 1].set_title('Velocity Y')
     plt.tight_layout()
-
-    viz_file = f"{os.path.dirname(output_file)}/stable_rb_visualization.png"
-    plt.savefig(viz_file, dpi=150, bbox_inches='tight')
-    print(f"✅ Visualization saved: {viz_file}")
-    plt.close()
-
-    return viz_file
+    plt.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Generate Rayleigh-Bénard datasets')
+def parse_args():
+    parser = argparse.ArgumentParser(description='Numerical Rayleigh–Bénard data generator')
     parser.add_argument('--Ra', type=float, default=1e5, help='Rayleigh number')
-    parser.add_argument('--n_runs', type=int, default=5, help='Number of runs')
-    parser.add_argument('--n_samples', type=int, default=200, help='Snapshots per run (synthetic mode)')
-    parser.add_argument('--nx', type=int, default=192, help='Grid points in x')
+    parser.add_argument('--Pr', type=float, default=0.7, help='Prandtl number')
+    parser.add_argument('--n_runs', type=int, default=25, help='Number of independent runs')
+    parser.add_argument('--nx', type=int, default=128, help='Grid points in x')
     parser.add_argument('--ny', type=int, default=64, help='Grid points in y')
-    parser.add_argument('--dt', type=float, default=1e-3, help='Integrator time step (numerical mode)')
-    parser.add_argument('--t_start', type=float, default=5.0, help='Warm-up time before sampling (numerical mode)')
-    parser.add_argument('--t_end', type=float, default=15.0, help='Final snapshot time (numerical mode)')
-    parser.add_argument('--sample_dt', type=float, default=0.1, help='Interval between saved frames (numerical mode)')
-    parser.add_argument('--save_path', type=str, default='rb_data_numerical', help='Save directory')
-    parser.add_argument('--visualize', action='store_true', help='Create visualizations')
-    parser.add_argument('--mode', type=str, default='paper', choices=['paper', 'synthetic'],
-                        help='Generation mode: "paper" uses numerical solver, "synthetic" uses analytic approximation')
-
-    args = parser.parse_args()
-
-    # Clear old data
-    if os.path.exists(args.save_path):
-        print(f"🗑️  Clearing old data in {args.save_path}")
-        import shutil
-        shutil.rmtree(args.save_path)
-
-    # Generate stable data
-    if args.mode == 'paper':
-        all_data = generate_paper_style_dataset(
-            Ra=args.Ra,
-            n_runs=args.n_runs,
-            nx=args.nx,
-            ny=args.ny,
-            save_path=args.save_path,
-            dt=args.dt,
-            t_start=args.t_start,
-            t_end=args.t_end,
-            sample_dt=args.sample_dt
-        )
-    else:
-        all_data = generate_training_dataset_synthetic(
-            Ra=args.Ra,
-            n_runs=args.n_runs,
-            n_samples=args.n_samples,
-            nx=args.nx,
-            ny=args.ny,
-            save_path=args.save_path,
-            dt=args.sample_dt
-        )
-
-    print(f"\n✅ Stable data generation complete!")
-    print(f"📁 Data saved in: {args.save_path}/")
-    print(f"🚀 Ready for CDAnet training with realistic, stable data!")
-
-    # Create visualizations if requested
-    if args.visualize:
-        output_file = f'{args.save_path}/rb2d_ra{args.Ra:.0e}_consolidated.h5'
-        visualize_data(output_file)
+    parser.add_argument('--dt', type=float, default=5e-4, help='Integrator time step')
+    parser.add_argument('--t_start', type=float, default=25.0, help='Warm-up time before sampling')
+    parser.add_argument('--t_end', type=float, default=45.0, help='Final sampling time')
+    parser.add_argument('--sample_dt', type=float, default=0.1, help='Interval between saved frames')
+    parser.add_argument('--save_path', type=str, default='rb_data_numerical', help='Output directory')
+    parser.add_argument('--visualize', action='store_true', help='Save a sample snapshot figure')
+    return parser.parse_args()
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    args = parse_args()
+    print('🚀 Starting numerical RB data generation...')
+    generate_training_dataset(
+        Ra=args.Ra,
+        Pr=args.Pr,
+        n_runs=args.n_runs,
+        nx=args.nx,
+        ny=args.ny,
+        dt=args.dt,
+        t_start=args.t_start,
+        t_end=args.t_end,
+        sample_dt=args.sample_dt,
+        save_path=args.save_path,
+        visualize=args.visualize,
+    )

@@ -45,8 +45,8 @@ python3 generate_rb_data.py \
     --Ra 1e5 \
     --save_path rb_data_numerical \
     --mode paper \
-    --nx 192 --ny 64 \
-    --t_start 5.0 --t_end 15.0 --sample_dt 0.1 \
+    --nx 128 --ny 64 \
+    --dt 5e-4 --t_start 25.0 --t_end 45.0 --sample_dt 0.1 \
     --visualize
 ```
 
